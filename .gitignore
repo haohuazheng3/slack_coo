@@ -1,0 +1,18 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Tests & coverage
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo

@@ -1,0 +1,20 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  title       String
+  time        DateTime
+  assignee    String   // Can be a Slack user ID
+  channelId   String
+  createdBy   String   // Creator's Slack ID
+  createdAt   DateTime @default(now())
+  completed   Boolean  @default(false)
+}
+
