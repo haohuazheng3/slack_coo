@@ -8,18 +8,16 @@ const openai = new OpenAI({
 });
 
 export async function parseTaskFromText(text: string) {
-  const prompt = `You are a structured task parsing assistant. Convert human natural language task descriptions into JSON format. Example:
-  
-Input: "Remind me to attend a meeting tomorrow at 3 PM"
-Output: {
-  "title": "Meeting",
-  "time": "2025-07-26T15:00:00",
-  "assignee": "Me"
-}
+  const prompt = `
+You are a strict task parser. Convert user input into a JSON with the following fields:
+- title: task title (string)
+- time: ISO datetime string (e.g., "2025-08-24T09:00:00Z"). Leave empty if not clear.
+- reminder_time: original relative description if given (e.g., "2 minutes later"). Otherwise empty.
+- assignee: responsible person, prefer Slack mention form (e.g., "<@UXXXX>").
+Only output valid JSON, nothing else.
+Input: """${text}"""
+`;
 
-Please parse the following text:
-"${text}"
-Output:`;
 
   const completion = await openai.chat.completions.create({
     messages: [{ role: "user", content: prompt }],
