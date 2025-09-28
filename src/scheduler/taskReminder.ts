@@ -26,6 +26,7 @@ export function startTaskReminderScheduler() {
           title: task.title,
           time: task.time,
           assignee: task.assignee,
+          assignees: task.assignees,
           channelId: task.channelId
         });
       }

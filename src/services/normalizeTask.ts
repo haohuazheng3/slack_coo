@@ -46,7 +46,8 @@ export type ParsedTaskInput = {
   task?: string;
   time?: string;            // Prefer ISO string if available
   reminder_time?: string;   // If user said "2 minutes later", capture this
-  assignee?: string;        // Ideally "<@UXXXX>"
+  assignee?: string;        // Primary assignee, ideally "<@UXXXX>"
+  assignees?: string[];     // All mentioned users, ideally ["<@UXXXX>", "<@UYYYY>"]
   channelId: string;
   createdBy: string;
   rawText?: string;         // Original text, used as fallback
@@ -56,9 +57,26 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
   const title = (input.title || input.task || '').trim();
   if (!title) throw new Error('Missing task title (title/task)');
 
+  // Extract primary assignee
   let assignee = (input.assignee || '').trim();
   const idMatch = assignee.match(/U[A-Z0-9]+/i);
   if (idMatch) assignee = idMatch[0];
+
+  // Extract all assignees from the assignees array
+  const assignees: string[] = [];
+  if (input.assignees && Array.isArray(input.assignees)) {
+    for (const assigneeStr of input.assignees) {
+      const match = assigneeStr.match(/U[A-Z0-9]+/i);
+      if (match) {
+        assignees.push(match[0]);
+      }
+    }
+  }
+  
+  // If no assignees were found in the array, use the primary assignee
+  if (assignees.length === 0 && assignee) {
+    assignees.push(assignee);
+  }
 
   let when: Date | null = null;
 
@@ -81,6 +99,7 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
     title,
     time: when,
     assignee,
+    assignees,
     channelId: input.channelId,
     createdBy: input.createdBy,
   };
