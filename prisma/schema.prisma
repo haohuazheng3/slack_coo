@@ -11,7 +11,8 @@ model Task {
   id          String   @id @default(cuid())
   title       String
   time        DateTime
-  assignee    String   // Can be a Slack user ID
+  assignee    String   // Primary assignee (Slack user ID)
+  assignees   String[] // All mentioned users (Slack user IDs)
   channelId   String
   createdBy   String   // Creator's Slack ID
   createdAt   DateTime @default(now())

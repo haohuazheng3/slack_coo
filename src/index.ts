@@ -66,13 +66,14 @@ app.event('app_mention', async ({ event, say, client }) => {
 
   // 2) Build the normalized payload for DB write
   //    - We pass both ISO time (if any) and relative time for fallback parsing
-  //    - We also pass rawText for last-resort parsing (e.g., “in 2 minutes”)
+  //    - We also pass rawText for last-resort parsing (e.g., "in 2 minutes")
   const payload: ParsedTaskInput = {
     title: gpt.title,
     task: gpt.task,
     time: gpt.time,                     // prefer ISO string if GPT provided
     reminder_time: gpt.reminder_time,   // e.g., "in 2 minutes"
     assignee: gpt.assignee || userId,   // if GPT didn't return, default to requester
+    assignees: gpt.assignees || [],     // all mentioned users
     channelId,
     createdBy: userId,
     rawText: text,

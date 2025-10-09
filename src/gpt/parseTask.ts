@@ -13,7 +13,8 @@ You are a strict task parser. Convert user input into a JSON with the following 
 - title: task title (string)
 - time: ISO datetime string (e.g., "2025-08-24T09:00:00Z"). Leave empty if not clear.
 - reminder_time: original relative description if given (e.g., "2 minutes later"). Otherwise empty.
-- assignee: responsible person, prefer Slack mention form (e.g., "<@UXXXX>").
+- assignee: primary responsible person, prefer Slack mention form (e.g., "<@UXXXX>").
+- assignees: array of ALL mentioned users in Slack mention form (e.g., ["<@UXXXX>", "<@UYYYY>"]).
 Only output valid JSON, nothing else.
 Input: """${text}"""
 `;
