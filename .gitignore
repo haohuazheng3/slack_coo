@@ -19,3 +19,4 @@ coverage/
 
 # Prisma generated artifacts
 src/generated/
+.venv/
