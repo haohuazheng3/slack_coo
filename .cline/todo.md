@@ -1,0 +1,10 @@
+- [x] Analyze requirements for the deadline reminder and response flow
+- [x] Review existing scheduler and Slack message modules (`src/scheduler/taskReminder.ts`, `src/slack/postTaskReminder.ts`, `src/ui/taskCard.ts`)
+- [ ] Implement logic to trigger reminders 2 hours before task deadlines
+- [ ] Create Slack direct message card with task info and two buttons: "Completed" and "Not Completed"
+- [ ] Implement Slack interaction handlers for both responses
+- [ ] On "Completed" click: update task status in the database
+- [ ] On "Not Completed" click: prompt user for reason and store response in the database
+- [ ] Ensure database schema supports storing completion status and explanation
+- [ ] Test the full flow end-to-end (scheduler → Slack message → user response → DB update)
+- [ ] Verify results and handle edge cases (e.g., missing assignee, past deadlines)

@@ -9,14 +9,14 @@ export function startTaskReminderScheduler() {
     console.log("⏰ Checking task reminders...");
 
     const now = new Date();
-    const oneMinuteLater = new Date(now.getTime() + 60 * 1000);
-    const oneMinuteBefore = new Date(now.getTime() - 60 * 1000);
+    const twoHoursLater = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const twoHoursBefore = new Date(now.getTime() - 2 * 60 * 60 * 1000);
 
     try {
       const tasks = await prisma.task.findMany({
         where: {
           completed: false,
-          time: { gte: oneMinuteBefore, lte: oneMinuteLater }
+          time: { gte: twoHoursBefore, lte: twoHoursLater }
         }
       });
 
@@ -26,7 +26,6 @@ export function startTaskReminderScheduler() {
           title: task.title,
           time: task.time,
           assignee: task.assignee,
-          assignees: task.assignees,
           channelId: task.channelId
         });
       }

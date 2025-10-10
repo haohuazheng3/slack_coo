@@ -23,11 +23,8 @@ const app = new App({
   receiver,
 });
 
-// Listen for button clicks
-app.action<BlockAction<ButtonAction>>("complete_task", async ({ ack, body, client }) => {
+app.action<BlockAction<ButtonAction>>("task_completed", async ({ ack, body, client }) => {
   await ack();
-
-  // Assert body always has actions
   const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
 
   await prisma.task.update({
@@ -37,7 +34,33 @@ app.action<BlockAction<ButtonAction>>("complete_task", async ({ ack, body, clien
 
   await client.chat.postMessage({
     channel: body.user.id,
-    text: `✅ Task completed!`
+    text: `✅ Task marked as completed!`
+  });
+});
+
+app.action<BlockAction<ButtonAction>>("task_not_completed", async ({ ack, body, client, say }) => {
+  await ack();
+  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
+
+  await client.chat.postMessage({
+    channel: body.user.id,
+    text: "❌ Please provide a short reason (1–2 sentences) why the task was not completed."
+  });
+
+  // Listen for the next message from the same user
+  app.message(async ({ message }) => {
+    const msg = message as any;
+    if (msg.user === body.user.id && msg.text) {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { notCompletedReason: msg.text }
+      });
+
+      await client.chat.postMessage({
+        channel: body.user.id,
+        text: "📝 Thank you! Your reason has been recorded."
+      });
+    }
   });
 });
 
@@ -75,7 +98,7 @@ app.event('app_mention', async ({ event, say, client }) => {
     assignee: gpt.assignee || userId,   // if GPT didn't return, default to requester
     assignees: gpt.assignees || [],     // all mentioned users
     channelId,
-    createdBy: userId,
+    createdBy: process.env.SLACK_BOT_USER_ID || userId,
     rawText: text,
   };
 

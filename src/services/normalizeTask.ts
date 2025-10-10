@@ -92,7 +92,10 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
   }
 
   if (!when || isNaN(when.getTime())) {
-    throw new Error(`Invalid time. Got time="${input.time}", reminder_time="${input.reminder_time}"`);
+    console.warn(
+      `⚠️ normalizeToDBTask: Invalid or missing time. Got time="${input.time}", reminder_time="${input.reminder_time}". Defaulting to current time.`
+    );
+    when = new Date();
   }
 
   return {
