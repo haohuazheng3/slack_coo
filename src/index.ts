@@ -98,7 +98,7 @@ app.event('app_mention', async ({ event, say, client }) => {
     assignee: gpt.assignee || userId,   // if GPT didn't return, default to requester
     assignees: gpt.assignees || [],     // all mentioned users
     channelId,
-    createdBy: process.env.SLACK_BOT_USER_ID || userId,
+    createdBy: userId,
     rawText: text,
   };
 
@@ -159,6 +159,17 @@ registerTaskActions(app); // ✅ Register button action handlers
 (async () => {
   await app.start(Number(process.env.PORT) || 3000);
   console.log('⚡ Slack app is running!');
+
+  // Resolve bot user ID at runtime so we never DM the bot by mistake
+  try {
+    const auth = await app.client.auth.test();
+    if (auth && (auth as any).user_id) {
+      process.env.SLACK_BOT_USER_ID = (auth as any).user_id;
+      console.log('🤖 Resolved SLACK_BOT_USER_ID:', process.env.SLACK_BOT_USER_ID);
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to resolve bot user id via auth.test()', e);
+  }
 
   // Start scheduled task reminders
   startTaskReminderScheduler();
