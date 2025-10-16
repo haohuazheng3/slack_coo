@@ -1,4 +1,3 @@
-import express from 'express';
 import { App, ExpressReceiver } from '@slack/bolt';
 import dotenv from 'dotenv';
 import { parseTaskFromText } from './gpt/parseTask';
@@ -23,44 +22,44 @@ const app = new App({
   receiver,
 });
 
+const pendingNotCompleted = new Map<string, { taskId: string }>();
+
 app.action<BlockAction<ButtonAction>>("task_completed", async ({ ack, body, client }) => {
   await ack();
-  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
+  const taskId = requireString((body as BlockAction<ButtonAction>).actions[0].value, 'actions[0].value');
+  const userId = requireString((body as any).user?.id, 'body.user.id');
 
   await prisma.task.update({
     where: { id: taskId },
-    data: { completed: true },
+    data: { completed: true, completedAt: new Date() },
   });
 
   await client.chat.postMessage({
-    channel: body.user.id,
+    channel: userId,
     text: `✅ Task marked as completed!`
   });
 });
 
-app.action<BlockAction<ButtonAction>>("task_not_completed", async ({ ack, body, client, say }) => {
+app.action<BlockAction<ButtonAction>>("task_not_completed", async ({ ack, body, client }) => {
   await ack();
-  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
+  const taskId = requireString((body as BlockAction<ButtonAction>).actions[0].value, 'actions[0].value');
+  const userId = requireString((body as any).user?.id, 'body.user.id');
+
+  // If a pending reason already existed for this user for a different task, notify replacement
+  const existing = pendingNotCompleted.get(userId);
+  if (existing && existing.taskId !== taskId) {
+    await client.chat.postMessage({
+      channel: userId,
+      text: "ℹ️ Note: your previous pending reason was replaced by this task."
+    });
+  }
+
+  // Record that this user owes a reason for this task (single-use, in-memory)
+  pendingNotCompleted.set(userId, { taskId });
 
   await client.chat.postMessage({
-    channel: body.user.id,
+    channel: userId,
     text: "❌ Please provide a short reason (1–2 sentences) why the task was not completed."
-  });
-
-  // Listen for the next message from the same user
-  app.message(async ({ message }) => {
-    const msg = message as any;
-    if (msg.user === body.user.id && msg.text) {
-      await prisma.task.update({
-        where: { id: taskId },
-        data: { notCompletedReason: msg.text }
-      });
-
-      await client.chat.postMessage({
-        channel: body.user.id,
-        text: "📝 Thank you! Your reason has been recorded."
-      });
-    }
   });
 });
 
@@ -148,9 +147,44 @@ function requireString(v: string | undefined, name: string): string {
 }
 
 // 👇 Message handler
-app.message(async ({ message, say }) => {
-  if (message.subtype === undefined) {
-    await say(`Got your message <@${message.user}>!`);
+app.message(async ({ message, say, client }) => {
+  const msg = message as any;
+  if (!msg?.user || !msg?.text) return;
+  const isDM = typeof msg.channel === 'string' && msg.channel.startsWith('D');
+
+  // If user owes a reason for a recent "Not Completed" click, capture only once
+  const pending = pendingNotCompleted.get(msg.user);
+  if (pending) {
+    // Only capture reason via DM to the app; ignore channel messages
+    if (!isDM) {
+      return;
+    }
+    try {
+      const t = await prisma.task.findUnique({ where: { id: pending.taskId } });
+      if (t && !t.notCompletedReason) {
+        await prisma.task.update({
+          where: { id: pending.taskId },
+          data: { notCompletedReason: msg.text, notCompletedReasonAt: new Date() }
+        });
+
+        await client.chat.postMessage({
+          channel: msg.user,
+          text: "📝 Thank you! Your reason has been recorded."
+        });
+      }
+    } catch (e) {
+      console.error('Failed to record not completed reason:', e);
+    } finally {
+      // Ensure we only handle the very next message once
+      pendingNotCompleted.delete(msg.user);
+    }
+    return; // prevent generic reply
+  }
+
+  // Generic reply only for non-DM messages
+  // isDM computed above
+  if (msg.subtype === undefined && !isDM) {
+    await say(`Got your message <@${msg.user}>!`);
   }
 });
 
