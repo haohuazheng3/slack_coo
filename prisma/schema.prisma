@@ -8,14 +8,17 @@ datasource db {
 }
 
 model Task {
-  id          String   @id @default(cuid())
-  title       String
-  time        DateTime
-  assignee    String   // Primary assignee (Slack user ID)
-  assignees   String[] // All mentioned users (Slack user IDs)
-  channelId   String
-  createdBy   String   // Creator's Slack ID
-  createdAt   DateTime @default(now())
-  completed   Boolean  @default(false)
+  id                     String    @id @default(cuid())
+  title                  String
+  time                   DateTime
+  assignee               String
+  channelId              String
+  createdBy              String
+  createdAt              DateTime  @default(now())
+  completed              Boolean   @default(false)
+  notCompletedReason     String?
+  notCompletedReasonAt   DateTime?
+  assignees              String[]
+  completedAt            DateTime?
+  deadlineReminderSentAt DateTime?
 }
-

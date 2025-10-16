@@ -78,6 +78,27 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
     assignees.push(assignee);
   }
 
+  // Prevent assigning the bot to itself; fall back to requester (createdBy)
+  const botId = process.env.SLACK_BOT_USER_ID;
+  if (botId && assignee === botId) {
+    assignee = input.createdBy;
+  }
+  // Filter bot ID out of assignees array
+  if (botId) {
+    for (let i = assignees.length - 1; i >= 0; i--) {
+      if (assignees[i] === botId) {
+        assignees.splice(i, 1);
+      }
+    }
+  }
+  // Ensure we always have a valid human assignee
+  if (!assignee) {
+    assignee = input.createdBy;
+  }
+  if (!assignees.includes(assignee)) {
+    assignees.push(assignee);
+  }
+
   let when: Date | null = null;
 
   if (input.time) {
@@ -92,7 +113,10 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
   }
 
   if (!when || isNaN(when.getTime())) {
-    throw new Error(`Invalid time. Got time="${input.time}", reminder_time="${input.reminder_time}"`);
+    console.warn(
+      `⚠️ normalizeToDBTask: Invalid or missing time. Got time="${input.time}", reminder_time="${input.reminder_time}". Defaulting to current time.`
+    );
+    when = new Date();
   }
 
   return {

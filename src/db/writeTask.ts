@@ -8,10 +8,11 @@ export async function writeTaskToDB(parsed: ParsedTaskInput) {
     const data = normalizeToDBTask(parsed);
     const created = await prisma.task.create({ data });
     console.log("✅ Task saved to DB:", created);
+
+
     return created;
   } catch (e) {
     console.error("❌ Failed to save task:", e);
     return null;
   }
 }
-

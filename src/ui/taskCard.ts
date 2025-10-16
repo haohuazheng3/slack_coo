@@ -30,21 +30,16 @@ export function buildTaskBlocks(task: {
       elements: [
         {
           type: "button",
-          text: { type: "plain_text", text: "Complete ✅" },
+          text: { type: "plain_text", text: "Completed ✅" },
           style: "primary",
-          action_id: "task_complete",
+          action_id: "task_completed",
           value: task.id
         },
         {
           type: "button",
-          text: { type: "plain_text", text: "Delay 15m" },
-          action_id: "task_delay_15m",
-          value: task.id
-        },
-        {
-          type: "button",
-          text: { type: "plain_text", text: "Delay 1h" },
-          action_id: "task_delay_60m",
+          text: { type: "plain_text", text: "Not Completed ❌" },
+          style: "danger",
+          action_id: "task_not_completed",
           value: task.id
         }
       ]

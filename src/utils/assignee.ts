@@ -7,3 +7,11 @@ export function toSlackMention(raw: string) {
   // Fallback: return the original string
   return raw;
 }
+
+export function extractUserId(assignee: string): string | null {
+  // Accept "<@U123ABC>" or "U123ABC"
+  const m = assignee.match(/<@([A-Z0-9]+)>/i);
+  if (m) return m[1];
+  if (/^[UW][A-Z0-9]+$/i.test(assignee)) return assignee;
+  return null;
+}

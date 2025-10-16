@@ -10,7 +10,7 @@ export async function postTaskReminder(task: {
   title: string;
   time: Date;
   assignee: string;
-  assignees: string[];
+  assignees?: string[];
   channelId: string;
 }) {
   try {
@@ -24,16 +24,18 @@ export async function postTaskReminder(task: {
     });
 
     // Send individual notifications to each mentioned user
-    for (const userId of task.assignees) {
-      try {
-        await slack.chat.postMessage({
-          channel: userId, // Direct message to user
-          text: `🔔 Reminder: ${task.title}`,
-          blocks: buildTaskBlocks({ ...task, assignee: userId })
-        });
-        console.log(`📨 Personal reminder sent to ${userId}`);
-      } catch (e) {
-        console.error(`❌ Failed to send personal reminder to ${userId}:`, e);
+    if (task.assignees) {
+      for (const userId of task.assignees) {
+        try {
+          await slack.chat.postMessage({
+            channel: userId, // Direct message to user
+            text: `🔔 Reminder: ${task.title}`,
+            blocks: buildTaskBlocks({ ...task, assignee: userId })
+          });
+          console.log(`📨 Personal reminder sent to ${userId}`);
+        } catch (e) {
+          console.error(`❌ Failed to send personal reminder to ${userId}:`, e);
+        }
       }
     }
 
@@ -42,4 +44,3 @@ export async function postTaskReminder(task: {
     console.error("❌ Failed to send reminder card:", e);
   }
 }
-
