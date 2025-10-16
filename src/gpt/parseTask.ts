@@ -29,6 +29,7 @@ Input: """${text}"""
 
   try {
     const parsed = JSON.parse(response!);
+    console.log("📋 GPT parsed result:", JSON.stringify(parsed, null, 2));
     return parsed;
   } catch (e) {
     console.error("GPT response could not be parsed into JSON", response);

@@ -64,6 +64,30 @@ app.action<BlockAction<ButtonAction>>("task_not_completed", async ({ ack, body, 
   });
 });
 
+// Handle List Tasks button click
+app.action<BlockAction<ButtonAction>>("list_tasks", async ({ ack, body, client }) => {
+  await ack();
+
+  // Get the user ID from the button value
+  const userId = (body as BlockAction<ButtonAction>).actions[0].value;
+  
+  if (!userId) {
+    console.error("No user ID found in list_tasks button value");
+    return;
+  }
+
+  // Create a say function for the client
+  const say = async (message: any) => {
+    await client.chat.postMessage({
+      channel: userId,
+      ...message
+    });
+  };
+
+  // Show pending tasks by default
+  await handleListTasks(userId, say, false, false);
+});
+
 // 👇 Challenge verification handler
 receiver.router.post('/slack/events', async (req, res) => {
   const { type, challenge } = req.body;
@@ -74,11 +98,114 @@ receiver.router.post('/slack/events', async (req, res) => {
   }
 });
 
+// Helper function to list user's tasks
+async function handleListTasks(userId: string, say: any, showCompleted: boolean = false, showAll: boolean = false) {
+  try {
+    // Build the where clause based on filters
+    const whereClause: any = {
+      OR: [
+        { createdBy: userId },
+        { assignee: userId },
+        { assignees: { has: userId } }
+      ]
+    };
+
+    // Filter by completion status
+    if (!showAll) {
+      whereClause.completed = showCompleted ? true : false;
+    }
+
+    const tasks = await prisma.task.findMany({
+      where: whereClause,
+      orderBy: { time: 'desc' },
+      take: 20 // Limit to 20 tasks
+    });
+
+    if (tasks.length === 0) {
+      const message = showCompleted ? "📋 You have no completed tasks!" : 
+                      showAll ? "📋 You have no tasks!" :
+                      "📋 You have no pending tasks!";
+      await say(message);
+      return;
+    }
+
+    // Count completed vs pending
+    const completedCount = tasks.filter(t => t.completed).length;
+    const pendingCount = tasks.filter(t => !t.completed).length;
+
+    // Build task list blocks
+    const statusText = showCompleted ? `Completed Tasks (${completedCount})` :
+                       showAll ? `All Tasks (${pendingCount} pending, ${completedCount} completed)` :
+                       `Pending Tasks (${pendingCount})`;
+
+    const taskBlocks: any[] = [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `📋 *${statusText}*`
+        }
+      },
+      { type: "divider" }
+    ];
+
+    for (const task of tasks) {
+      const assigneeMention = toSlackMention(task.assignee);
+      const timeText = task.time.toLocaleString();
+      const allAssignees = task.assignees && task.assignees.length > 0 
+        ? task.assignees.map(a => toSlackMention(a)).join(', ')
+        : assigneeMention;
+
+      const statusEmoji = task.completed ? "✅" : "⏰";
+      const statusText = task.completed ? " (Completed)" : "";
+
+      const taskBlock: any = {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `${task.completed ? "~" : ""}*${task.title}*${task.completed ? "~" : ""}${statusText}\n${statusEmoji} ${timeText}\n👤 ${allAssignees}`
+        }
+      };
+
+      // Only show Complete button for pending tasks
+      if (!task.completed) {
+        taskBlock.accessory = {
+          type: "button",
+          text: { type: "plain_text", text: "✅ Complete" },
+          style: "primary",
+          action_id: "task_complete",
+          value: task.id
+        };
+      }
+
+      taskBlocks.push(taskBlock);
+    }
+
+    await say({
+      text: `You have ${tasks.length} tasks`,
+      blocks: taskBlocks
+    });
+
+  } catch (error) {
+    console.error("❌ Error listing tasks:", error);
+    await say("❌ Failed to retrieve tasks. Please try again later.");
+  }
+}
+
 app.event('app_mention', async ({ event, say, client }) => {
   const text = event.text;
   const userId = requireString((event as any).user, 'event.user');
   const channelId = requireString((event as any).channel, 'event.channel');
 
+  // Check if user wants to list tasks
+  const lowerText = text.toLowerCase();
+  if (lowerText.includes('list')) {
+    // Determine what type of tasks to show based on specific commands
+    const showCompleted = lowerText.includes('done');
+    const showAll = lowerText.includes('all');
+    await handleListTasks(userId, say, showCompleted, showAll);
+    return;
+  }
 
   // 1) Call GPT to parse the natural language into fields
   const gpt = await parseTaskFromText(text);
@@ -133,6 +260,12 @@ app.event('app_mention', async ({ event, say, client }) => {
             style: "primary",
             action_id: "task_complete",   // IMPORTANT: must match your action handler
             value: created.id             // pass task ID back to the action handler
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "📋 List Tasks" },
+            action_id: "list_tasks",
+            value: userId
           }
         ]
       }
