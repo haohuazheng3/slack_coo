@@ -88,6 +88,73 @@ app.action<BlockAction<ButtonAction>>("list_tasks", async ({ ack, body, client }
   await handleListTasks(userId, say, false, false);
 });
 
+// Handle Delete Task button click
+app.action<BlockAction<ButtonAction>>("task_delete", async ({ ack, body, client }) => {
+  await ack();
+
+  // Get the task ID from the button value
+  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
+  const userId = body.user.id;
+
+  if (!taskId) {
+    console.error("No task ID found in task_delete button value");
+    return;
+  }
+
+  try {
+    // Get the task details before deleting
+    const task = await prisma.task.findUnique({
+      where: { id: taskId }
+    });
+
+    // Delete the task from database
+    await prisma.task.delete({
+      where: { id: taskId }
+    });
+
+    // Send a confirmation message
+    await client.chat.postEphemeral({
+      channel: (body as any).channel?.id || userId,
+      user: userId,
+      text: `🗑️ Task deleted successfully: ${task?.title || 'Task'}`
+    });
+
+    // Refresh the task list by re-fetching tasks
+    const messageTs = (body as any).message?.ts;
+    const channel = (body as any).channel?.id;
+
+    if (messageTs && channel) {
+      // Determine what kind of list was being shown based on the original message
+      const originalBlocks = (body as any).message?.blocks || [];
+      const headerText = originalBlocks.length > 0 && originalBlocks[0]?.text?.text 
+        ? originalBlocks[0].text.text.toLowerCase() 
+        : '';
+      
+      const showCompleted = headerText.includes('completed tasks');
+      const showAll = headerText.includes('all tasks');
+
+      // Rebuild the task list without the deleted task
+      const say = async (message: any) => {
+        await client.chat.update({
+          channel: channel,
+          ts: messageTs,
+          ...message
+        });
+      };
+
+      await handleListTasks(userId, say, showCompleted, showAll);
+    }
+  } catch (error) {
+    console.error("❌ Error deleting task:", error);
+    
+    await client.chat.postEphemeral({
+      channel: (body as any).channel?.id || userId,
+      user: userId,
+      text: `❌ Failed to delete task. Please try again.`
+    });
+  }
+});
+
 // 👇 Challenge verification handler
 receiver.router.post('/slack/events', async (req, res) => {
   const { type, challenge } = req.body;
@@ -159,26 +226,42 @@ async function handleListTasks(userId: string, say: any, showCompleted: boolean 
       const statusEmoji = task.completed ? "✅" : "⏰";
       const statusText = task.completed ? " (Completed)" : "";
 
-      const taskBlock: any = {
+      taskBlocks.push({
         type: "section",
         text: {
           type: "mrkdwn",
           text: `${task.completed ? "~" : ""}*${task.title}*${task.completed ? "~" : ""}${statusText}\n${statusEmoji} ${timeText}\n👤 ${allAssignees}`
         }
-      };
+      });
 
+      // Add action buttons
+      const buttons: any[] = [];
+      
       // Only show Complete button for pending tasks
       if (!task.completed) {
-        taskBlock.accessory = {
+        buttons.push({
           type: "button",
           text: { type: "plain_text", text: "✅ Complete" },
           style: "primary",
           action_id: "task_complete",
           value: task.id
-        };
+        });
       }
 
-      taskBlocks.push(taskBlock);
+      // Always show Delete button
+      buttons.push({
+        type: "button",
+        text: { type: "plain_text", text: "🗑️" },
+        action_id: "task_delete",
+        value: task.id
+      });
+
+      if (buttons.length > 0) {
+        taskBlocks.push({
+          type: "actions",
+          elements: buttons
+        });
+      }
     }
 
     await say({
@@ -266,6 +349,12 @@ app.event('app_mention', async ({ event, say, client }) => {
             text: { type: "plain_text", text: "📋 List Tasks" },
             action_id: "list_tasks",
             value: userId
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "🗑️" },
+            action_id: "task_delete",
+            value: created.id
           }
         ]
       }
