@@ -2,7 +2,7 @@
 // Purpose: Convert GPT output (which may have inconsistent field names and relative times)
 // into a normalized object ready for database insertion: { title, time(Date), assignee, channelId, createdBy }
 
-function parseRelativeTimeToDate(input: string, base = new Date()): Date | null {
+export function parseRelativeTimeToDate(input: string, base = new Date()): Date | null {
   if (!input) return null;
   const s = input.trim().toLowerCase();
 
@@ -10,8 +10,8 @@ function parseRelativeTimeToDate(input: string, base = new Date()): Date | null 
   const isoTry = new Date(s);
   if (!isNaN(isoTry.getTime())) return isoTry;
 
-  // 2) English relative time: in X minutes / X minutes later
-  let m = s.match(/in\s+(\d+)\s*(minute|min|minutes)\b|(\d+)\s*(minute|min|minutes)\s*(later|after)?/);
+  // 2) English relative time: in X minutes / X minutes later (support min/mins)
+  let m = s.match(/in\s+(\d+)\s*(minute|min|minutes|mins)\b|(\d+)\s*(minute|min|minutes|mins)\s*(later|after)?/);
   if (m) {
     const num = parseInt(m[1] || m[3], 10);
     if (!isNaN(num)) return new Date(base.getTime() + num * 60 * 1000);
