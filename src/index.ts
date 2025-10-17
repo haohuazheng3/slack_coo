@@ -369,6 +369,13 @@ function requireString(v: string | undefined, name: string): string {
   return v;
 }
 
+// 👇 Message handler
+app.message(async ({ message, say }) => {
+  if (message.subtype === undefined) {
+    await say(`Got your message <@${message.user}>!`);
+  }
+});
+
 registerTaskActions(app); // ✅ Register button action handlers
 
 (async () => {
