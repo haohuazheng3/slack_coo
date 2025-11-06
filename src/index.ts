@@ -1,18 +1,16 @@
-import express from 'express';
-import { App, ExpressReceiver } from '@slack/bolt';
+import { App, ExpressReceiver, BlockAction, ButtonAction } from '@slack/bolt';
 import dotenv from 'dotenv';
-import { parseTaskFromText } from './gpt/parseTask';
-import { writeTaskToDB } from './db/writeTask';
-import { startTaskReminderScheduler } from './scheduler/taskReminder';
-import { PrismaClient } from "@prisma/client";
-import { BlockAction, ButtonAction } from '@slack/bolt';
+import { PrismaClient } from '@prisma/client';
 import { registerTaskActions } from './actions/taskActions';
-import { toSlackMention } from './utils/assignee';    
-import type { ParsedTaskInput } from './services/normalizeTask';
-
-const prisma = new PrismaClient();
+import { startTaskReminderScheduler } from './scheduler/taskReminder';
+import { FunctionRegistry } from './orchestrator/functionRegistry';
+import { registerCoreFunctions } from './functions';
+import { runAiOrchestrator } from './orchestrator/runAiOrchestrator';
+import { buildTaskListMessage } from './slack/listTasks';
 
 dotenv.config();
+
+const prisma = new PrismaClient();
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET!,
@@ -23,7 +21,12 @@ const app = new App({
   receiver,
 });
 
-app.action<BlockAction<ButtonAction>>("task_completed", async ({ ack, body, client }) => {
+const functionRegistry = new FunctionRegistry();
+registerCoreFunctions(functionRegistry);
+
+const pendingTaskReasons = new Map<string, string>();
+
+app.action<BlockAction<ButtonAction>>('task_completed', async ({ ack, body, client }) => {
   await ack();
   const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
 
@@ -34,355 +37,276 @@ app.action<BlockAction<ButtonAction>>("task_completed", async ({ ack, body, clie
 
   await client.chat.postMessage({
     channel: body.user.id,
-    text: `✅ Task marked as completed!`
+    text: '✅ Task marked as completed!',
   });
 });
 
-app.action<BlockAction<ButtonAction>>("task_not_completed", async ({ ack, body, client, say }) => {
+app.action<BlockAction<ButtonAction>>('task_not_completed', async ({ ack, body, client }) => {
   await ack();
   const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
-
-  await client.chat.postMessage({
-    channel: body.user.id,
-    text: "❌ Please provide a short reason (1–2 sentences) why the task was not completed."
-  });
-
-  // Listen for the next message from the same user
-  app.message(async ({ message }) => {
-    const msg = message as any;
-    if (msg.user === body.user.id && msg.text) {
-      await prisma.task.update({
-        where: { id: taskId },
-        data: { notCompletedReason: msg.text }
-      });
-
-      await client.chat.postMessage({
-        channel: body.user.id,
-        text: "📝 Thank you! Your reason has been recorded."
-      });
-    }
-  });
-});
-
-// Handle List Tasks button click
-app.action<BlockAction<ButtonAction>>("list_tasks", async ({ ack, body, client }) => {
-  await ack();
-
-  // Get the user ID from the button value
-  const userId = (body as BlockAction<ButtonAction>).actions[0].value;
-  
-  if (!userId) {
-    console.error("No user ID found in list_tasks button value");
+  if (!taskId) {
+    console.error('Task ID missing for task_not_completed action');
+    await client.chat.postMessage({
+      channel: body.user.id,
+      text: '❌ Unable to record the reason because the task ID was missing. Please try again.',
+    });
     return;
   }
 
-  // Create a say function for the client
-  const say = async (message: any) => {
-    await client.chat.postMessage({
-      channel: userId,
-      ...message
-    });
-  };
+  pendingTaskReasons.set(body.user.id, taskId);
 
-  // Show pending tasks by default
-  await handleListTasks(userId, say, false, false);
+  await client.chat.postMessage({
+    channel: body.user.id,
+    text: '❌ Please provide a short reason (1–2 sentences) why the task was not completed.',
+  });
 });
 
-// Handle Delete Task button click
-app.action<BlockAction<ButtonAction>>("task_delete", async ({ ack, body, client }) => {
+app.action<BlockAction<ButtonAction>>('list_tasks', async ({ ack, body, client }) => {
+  await ack();
+  const userId = (body as BlockAction<ButtonAction>).actions[0].value;
+
+  if (!userId) {
+    console.error('No user ID found in list_tasks button value');
+    return;
+  }
+
+  const message = await buildTaskListMessage(prisma, userId, {
+    showCompleted: false,
+    showAll: false,
+  });
+
+  await client.chat.postMessage({
+    channel: userId,
+    text: message.text,
+    blocks: message.blocks,
+  });
+});
+
+app.action<BlockAction<ButtonAction>>('task_delete', async ({ ack, body, client }) => {
   await ack();
 
-  // Get the task ID from the button value
   const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
   const userId = body.user.id;
 
   if (!taskId) {
-    console.error("No task ID found in task_delete button value");
+    console.error('No task ID found in task_delete button value');
     return;
   }
 
   try {
-    // Get the task details before deleting
     const task = await prisma.task.findUnique({
-      where: { id: taskId }
+      where: { id: taskId },
     });
 
-    // Delete the task from database
     await prisma.task.delete({
-      where: { id: taskId }
+      where: { id: taskId },
     });
 
-    // Send a confirmation message
     await client.chat.postEphemeral({
       channel: (body as any).channel?.id || userId,
       user: userId,
-      text: `🗑️ Task deleted successfully: ${task?.title || 'Task'}`
+      text: `🗑️ Task deleted successfully: ${task?.title || 'Task'}`,
     });
 
-    // Refresh the task list by re-fetching tasks
     const messageTs = (body as any).message?.ts;
     const channel = (body as any).channel?.id;
 
     if (messageTs && channel) {
-      // Determine what kind of list was being shown based on the original message
       const originalBlocks = (body as any).message?.blocks || [];
-      const headerText = originalBlocks.length > 0 && originalBlocks[0]?.text?.text 
-        ? originalBlocks[0].text.text.toLowerCase() 
-        : '';
-      
+      const headerText =
+        originalBlocks.length > 0 && originalBlocks[0]?.text?.text
+          ? originalBlocks[0].text.text.toLowerCase()
+          : '';
+
       const showCompleted = headerText.includes('completed tasks');
       const showAll = headerText.includes('all tasks');
 
-      // Rebuild the task list without the deleted task
-      const say = async (message: any) => {
-        await client.chat.update({
-          channel: channel,
-          ts: messageTs,
-          ...message
-        });
-      };
+      const refreshMessage = await buildTaskListMessage(prisma, userId, {
+        showCompleted,
+        showAll,
+      });
 
-      await handleListTasks(userId, say, showCompleted, showAll);
+      await client.chat.update({
+        channel,
+        ts: messageTs,
+        text: refreshMessage.text,
+        blocks: refreshMessage.blocks,
+      });
     }
   } catch (error) {
-    console.error("❌ Error deleting task:", error);
-    
+    console.error('❌ Error deleting task:', error);
+
     await client.chat.postEphemeral({
       channel: (body as any).channel?.id || userId,
       user: userId,
-      text: `❌ Failed to delete task. Please try again.`
+      text: '❌ Failed to delete task. Please try again.',
     });
   }
 });
 
-// 👇 Challenge verification handler
 receiver.router.post('/slack/events', async (req, res) => {
   const { type, challenge } = req.body;
   if (type === 'url_verification') {
     return res.status(200).send(challenge);
-  } else {
-    res.status(200).send(); // Prevent Slack retry due to timeout
   }
+  res.status(200).send();
 });
 
-// Helper function to list user's tasks
-async function handleListTasks(userId: string, say: any, showCompleted: boolean = false, showAll: boolean = false) {
-  try {
-    // Build the where clause based on filters
-    const whereClause: any = {
-      OR: [
-        { createdBy: userId },
-        { assignee: userId },
-        { assignees: { has: userId } }
-      ]
-    };
+app.event('app_mention', async ({ event, client }) => {
+  const userId = requireString((event as any).user, 'event.user');
+  const channelId = requireString((event as any).channel, 'event.channel');
+  const threadTs = ((event as any).thread_ts || event.ts) as string;
+  const originalText = event.text || '';
 
-    // Filter by completion status
-    if (!showAll) {
-      whereClause.completed = showCompleted ? true : false;
-    }
+  const botId = process.env.SLACK_BOT_USER_ID;
+  const sanitizedText = botId
+    ? originalText.replace(new RegExp(`<@${botId}>`, 'g'), '').trim()
+    : originalText;
 
-    const tasks = await prisma.task.findMany({
-      where: whereClause,
-      orderBy: { time: 'desc' },
-      take: 20 // Limit to 20 tasks
-    });
-
-    if (tasks.length === 0) {
-      const message = showCompleted ? "📋 You have no completed tasks!" : 
-                      showAll ? "📋 You have no tasks!" :
-                      "📋 You have no pending tasks!";
-      await say(message);
+  const send = async (message: string | { text?: string; blocks?: any[] }) => {
+    if (typeof message === 'string') {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: message,
+      });
       return;
     }
 
-    // Count completed vs pending
-    const completedCount = tasks.filter(t => t.completed).length;
-    const pendingCount = tasks.filter(t => !t.completed).length;
-
-    // Build task list blocks
-    const statusText = showCompleted ? `Completed Tasks (${completedCount})` :
-                       showAll ? `All Tasks (${pendingCount} pending, ${completedCount} completed)` :
-                       `Pending Tasks (${pendingCount})`;
-
-    const taskBlocks: any[] = [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `📋 *${statusText}*`
-        }
-      },
-      { type: "divider" }
-    ];
-
-    for (const task of tasks) {
-      const assigneeMention = toSlackMention(task.assignee);
-      const timeText = task.time.toLocaleString();
-      const allAssignees = task.assignees && task.assignees.length > 0 
-        ? task.assignees.map(a => toSlackMention(a)).join(', ')
-        : assigneeMention;
-
-      const statusEmoji = task.completed ? "✅" : "⏰";
-      const statusText = task.completed ? " (Completed)" : "";
-
-      taskBlocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `${task.completed ? "~" : ""}*${task.title}*${task.completed ? "~" : ""}${statusText}\n${statusEmoji} ${timeText}\n👤 ${allAssignees}`
-        }
-      });
-
-      // Add action buttons
-      const buttons: any[] = [];
-      
-      // Only show Complete button for pending tasks
-      if (!task.completed) {
-        buttons.push({
-          type: "button",
-          text: { type: "plain_text", text: "✅ Complete" },
-          style: "primary",
-          action_id: "task_complete",
-          value: task.id
-        });
-      }
-
-      // Always show Delete button
-      buttons.push({
-        type: "button",
-        text: { type: "plain_text", text: "🗑️" },
-        action_id: "task_delete",
-        value: task.id
-      });
-
-      if (buttons.length > 0) {
-        taskBlocks.push({
-          type: "actions",
-          elements: buttons
-        });
-      }
-    }
-
-    await say({
-      text: `You have ${tasks.length} tasks`,
-      blocks: taskBlocks
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: message.text ?? 'Notification',
+      blocks: message.blocks,
     });
-
-  } catch (error) {
-    console.error("❌ Error listing tasks:", error);
-    await say("❌ Failed to retrieve tasks. Please try again later.");
-  }
-}
-
-app.event('app_mention', async ({ event, say, client }) => {
-  const text = event.text;
-  const userId = requireString((event as any).user, 'event.user');
-  const channelId = requireString((event as any).channel, 'event.channel');
-
-  // Check if user wants to list tasks
-  const lowerText = text.toLowerCase();
-  if (lowerText.includes('list')) {
-    // Determine what type of tasks to show based on specific commands
-    const showCompleted = lowerText.includes('done');
-    const showAll = lowerText.includes('all');
-    await handleListTasks(userId, say, showCompleted, showAll);
-    return;
-  }
-
-  // 1) Call GPT to parse the natural language into fields
-  const gpt = await parseTaskFromText(text);
-  if (!gpt) {
-    await say("I couldn't understand this request. Please rephrase.");
-    return;
-  }
-
-  // 2) Build the normalized payload for DB write
-  //    - We pass both ISO time (if any) and relative time for fallback parsing
-  //    - We also pass rawText for last-resort parsing (e.g., "in 2 minutes")
-  const payload: ParsedTaskInput = {
-    title: gpt.title,
-    task: gpt.task,
-    time: gpt.time,                     // prefer ISO string if GPT provided
-    reminder_time: gpt.reminder_time,   // e.g., "in 2 minutes"
-    assignee: gpt.assignee || userId,   // if GPT didn't return, default to requester
-    assignees: gpt.assignees || [],     // all mentioned users
-    channelId,
-    createdBy: userId,
-    rawText: text,
   };
 
-  // 3) Persist to DB via our normalization adapter (handles time/assignee cleanup)
-  const created = await writeTaskToDB(payload);
-  if (!created) {
-    await say("❌ Task creation failed. Please try again later.");
+  const orchestratorResult = await runAiOrchestrator({
+    registry: functionRegistry,
+    userMessage: buildUserMessagePayload({
+      userId,
+      channelId,
+      text: sanitizedText || originalText,
+    }),
+    context: {
+      slack: {
+        client,
+        channelId,
+        userId,
+        rawText: sanitizedText || originalText,
+        threadTs,
+        send,
+      },
+      prisma,
+    },
+  });
+
+  if (orchestratorResult.finalReply) {
+    await send(orchestratorResult.finalReply);
+  }
+
+  for (const tool of orchestratorResult.toolResults) {
+    console.log(`🔧 Tool ${tool.name} -> ${tool.status}${tool.message ? ` (${tool.message})` : ''}`);
+  }
+});
+
+app.message(async ({ message, client }) => {
+  if ((message as any).subtype) {
     return;
   }
 
-  // 4) Build a Block Kit card with a “Complete” button
-  //    - Use toSlackMention for display. In DB we store just "UXXXX"; for UI we render "<@UXXXX>"
-  const displayAssignee = toSlackMention(created.assignee);
-  const displayTime = created.time.toLocaleString(); // TODO: switch to fixed timezone formatting later
+  const userId = (message as any).user as string | undefined;
+  const channelId = (message as any).channel as string | undefined;
+  const text = (message as any).text as string | undefined;
+  const ts = (message as any).ts as string | undefined;
 
-  await say({
-    text: `Task created: ${created.title}`, // fallback text
-    blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `✅ *Task created successfully!*\n• *Title:* ${created.title}\n• *Assignee:* ${displayAssignee}\n• *Time:* ${displayTime}`
-        }
+  if (!userId || !text || !channelId) {
+    return;
+  }
+
+  if (pendingTaskReasons.has(userId)) {
+    const taskId = pendingTaskReasons.get(userId)!;
+    pendingTaskReasons.delete(userId);
+
+    try {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { notCompletedReason: text },
+      });
+
+      await client.chat.postMessage({
+        channel: channelId,
+        text: '📝 Thank you! Your reason has been recorded.',
+      });
+    } catch (error) {
+      console.error('Failed to save not-completed reason', error);
+      await client.chat.postMessage({
+        channel: channelId,
+        text: '❌ Failed to record your reason. Please try again.',
+      });
+    }
+
+    return;
+  }
+
+  const isDirectMessage = channelId.startsWith('D');
+  if (!isDirectMessage) {
+    return;
+  }
+
+  const send = async (message: string | { text?: string; blocks?: any[] }) => {
+    if (typeof message === 'string') {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: ts,
+        text: message,
+      });
+      return;
+    }
+
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: ts,
+      text: message.text ?? 'Notification',
+      blocks: message.blocks,
+    });
+  };
+
+  const orchestratorResult = await runAiOrchestrator({
+    registry: functionRegistry,
+    userMessage: buildUserMessagePayload({
+      userId,
+      channelId,
+      text,
+    }),
+    context: {
+      slack: {
+        client,
+        channelId,
+        userId,
+        rawText: text,
+        threadTs: ts,
+        send,
       },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "✅ Mark as complete" },
-            style: "primary",
-            action_id: "task_complete",   // IMPORTANT: must match your action handler
-            value: created.id             // pass task ID back to the action handler
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "📋 List Tasks" },
-            action_id: "list_tasks",
-            value: userId
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "🗑️" },
-            action_id: "task_delete",
-            value: created.id
-          }
-        ]
-      }
-    ]
+      prisma,
+    },
   });
-});
 
-function requireString(v: string | undefined, name: string): string {
-  if (!v || typeof v !== 'string') {
-    throw new Error(`${name} is required but was missing/undefined.`);
+  if (orchestratorResult.finalReply) {
+    await send(orchestratorResult.finalReply);
   }
-  return v;
-}
 
-// 👇 Message handler
-app.message(async ({ message, say }) => {
-  if (message.subtype === undefined) {
-    await say(`Got your message <@${message.user}>!`);
+  for (const tool of orchestratorResult.toolResults) {
+    console.log(`🔧 Tool ${tool.name} -> ${tool.status}${tool.message ? ` (${tool.message})` : ''}`);
   }
 });
 
-registerTaskActions(app); // ✅ Register button action handlers
+registerTaskActions(app);
 
 (async () => {
   await app.start(Number(process.env.PORT) || 3000);
   console.log('⚡ Slack app is running!');
 
-  // Resolve bot user ID at runtime so we never DM the bot by mistake
   try {
     const auth = await app.client.auth.test();
     if (auth && (auth as any).user_id) {
@@ -393,6 +317,31 @@ registerTaskActions(app); // ✅ Register button action handlers
     console.warn('⚠️ Failed to resolve bot user id via auth.test()', e);
   }
 
-  // Start scheduled task reminders
   startTaskReminderScheduler();
 })();
+
+function requireString(v: string | undefined, name: string): string {
+  if (!v || typeof v !== 'string') {
+    throw new Error(`${name} is required but was missing/undefined.`);
+  }
+  return v;
+}
+
+function buildUserMessagePayload(payload: {
+  userId: string;
+  channelId: string;
+  text: string;
+}): string {
+  return [
+    'Incoming Slack message:',
+    JSON.stringify(
+      {
+        userId: payload.userId,
+        channelId: payload.channelId,
+        text: payload.text,
+      },
+      null,
+      2
+    ),
+  ].join('\n');
+}
