@@ -1,435 +1,296 @@
-# Slack AI COO (MVP) — End-to-End Step-by-Step Guide
+# Slack AI COO — AI-Orchestrated Operations Copilot
 
-Turn a single sentence in Slack into an **actionable workflow**:
-
-> Manager speaks → LLM parses → Task is stored → Scheduler reminds → Slack card (Complete/Delay) → DB update → (Next: Daily/Weekly reports)
-
-This README is **copy‑paste ready**. Follow it linearly. Every step is explicit and ordered to eliminate guesswork.
+This project turns a Slack mention into a fully AI-driven operations workflow. Instead of hard-coded pipelines, the AI chooses which automation tools to run, when to run them, and how to respond back to the human. Prompts train the assistant like an operator; functions give it the equipment it can use on demand.
 
 ---
 
 ## Table of Contents
 
-1. [What This MVP Does](#what-this-mvp-does)
-2. [Tech Stack](#tech-stack)
-3. [High-Level Architecture](#high-level-architecture)
-4. [Repository Structure](#repository-structure)
-5. [Prerequisites](#prerequisites)
-6. [Security First (.env & .gitignore)](#security-first-env--gitignore)
-7. [Step 1 — Clone & Install](#step-1--clone--install)
-8. [Step 2 — Create & Configure Your Slack App](#step-2--create--configure-your-slack-app)
-9. [Step 3 — Environment Variables](#step-3--environment-variables)
-10. [Step 4 — Database (Supabase + Prisma)](#step-4--database-supabase--prisma)
-11. [Step 5 — Run Locally (Nodemon + Ngrok)](#step-5--run-locally-nodemon--ngrok)
-12. [Step 6 — End-to-End Test](#step-6--end-to-end-test)
-13. [Step 7 — Scheduled Reminders (node-cron)](#step-7--scheduled-reminders-node-cron)
-14. [Step 8 — Interactive Actions (Complete / Delay)](#step-8--interactive-actions-complete--delay)
-15. [Troubleshooting & Pitfalls](#troubleshooting--pitfalls)
-16. [Deploy to Railway/Render](#deploy-to-railwayrender)
-17. [Push to GitHub (Safe & Repeatable)](#push-to-github-safe--repeatable)
-18. [Team Onboarding Checklist](#team-onboarding-checklist)
-19. [Extensibility: Next Milestones](#extensibility-next-milestones)
-20. [License](#license)
+1. [Key Capabilities](#key-capabilities)
+2. [Architecture Overview](#architecture-overview)
+3. [AI Orchestration Flow](#ai-orchestration-flow)
+4. [Tool Catalog](#tool-catalog)
+5. [Project Structure](#project-structure)
+6. [Prerequisites](#prerequisites)
+7. [Environment Variables](#environment-variables)
+8. [Slack App Setup](#slack-app-setup)
+9. [Local Development](#local-development)
+10. [Monitoring Tool Invocations](#monitoring-tool-invocations)
+11. [Adding New Tools](#adding-new-tools)
+12. [Testing](#testing)
+13. [Deployment Notes](#deployment-notes)
+14. [Roadmap Ideas](#roadmap-ideas)
 
 ---
 
-## What This MVP Does
+## Key Capabilities
 
-* **Listen in Slack** for `@mentions` to the bot.
-* **Parse natural language** into a structured task via an LLM (e.g., OpenAI GPT).
-  Example → "Tomorrow 9am remind me to discuss progress with Alex" → `{ title, time, assignee, channelId, createdBy }`.
-* **Store tasks** in **PostgreSQL** (Supabase) via **Prisma ORM**.
-* **Every minute**, find tasks whose time falls in a window (±1 min) and **post a reminder card** in Slack.
-* The card includes buttons: **Complete ✅**, **Delay 15m**, **Delay 1h**.
-* Clicking a button **acks** within 3 seconds, **updates DB**, and sends an **ephemeral** confirmation to the clicker.
-
----
-
-## Tech Stack
-
-* **TypeScript + Node.js**
-* **Express + @slack/bolt** (events webhook, interactive actions)
-* **node-cron** (scheduler)
-* **OpenAI (or Claude) API** for task parsing
-* **Supabase (PostgreSQL) + Prisma ORM** for persistence
-* **Ngrok** for local public tunneling
-* **Railway / Render** for production deployment (optional in MVP)
+- **AI-first command center**: every `@bot` mention or direct message is routed to OpenAI with a structured system prompt that describes the available tools.
+- **Bracket-triggered tools**: the assistant can call any registered function by emitting tokens like `[CreateTask]{...}`. No brackets means no automation runs.
+- **Unified execution context**: each tool receives Slack + database context, so it can post updates, modify records, and return status in one place.
+- **Live observability**: every tool call is logged to the console and echoed in Slack so humans see exactly what the AI is doing.
+- **Resilient fallbacks**: if the AI produces invalid JSON payloads or calls an unknown tool, the orchestrator captures the error and keeps the conversation going.
+- **Legacy actions retained**: existing button handlers (complete, delay, delete) still work for manual overrides.
 
 ---
 
-## High-Level Architecture
+## Architecture Overview
 
 ```
-Slack @YourBot → (Event: app_mention) → Bolt/Express receiver (/slack/events)
-  → LLM parses text → { title, time, assignee, channelId, createdBy }
-  → Prisma stores Task
-  → node-cron (every 1 min): find due tasks (time ∈ [now-1m, now+1m] & completed=false)
-    → Slack posts Block Kit card (Complete / Delay 15m / Delay 1h)
-      → user clicks button → app.action(...) → ack() within 3s
-        → Prisma updates (completed=true or time+=15m/60m)
-        → client.chat.postEphemeral() confirmation to clicker
+Slack @mention or DM
+          │
+          ▼
+Bolt receiver (app.event / app.message)
+          │
+          ▼
+runAiOrchestrator()
+  ├─ build system prompt (ai/prompt.ts)
+  ├─ call OpenAI (ai/openaiClient.ts)
+  ├─ parse bracket tokens (orchestrator/parseAiResponse.ts)
+  ├─ log + notify tool usage
+  └─ execute registered handlers (functions/*)
+          │
+          ▼
+Prisma (tasks table), Slack messages, schedulers, etc.
 ```
+
+Schedulers, reminder cards, and button actions continue to run exactly as before; the difference is that their functions are now callable by the AI itself.
 
 ---
 
-## Repository Structure
+## AI Orchestration Flow
+
+1. **Event capture**  
+   `app_mention` and Slack direct messages are intercepted in `src/index.ts`. Plain mentions are sanitized to remove the bot mention. Replies share a thread.
+
+2. **Context build**  
+   We assemble a `FunctionExecutionContext` containing:
+   - Slack client + `send()` helper constrained to the same channel/thread
+   - Prisma client for database operations
+   - Raw user message text and metadata
+
+3. **Prompt injection**  
+   `buildSystemPrompt()` lists every registered tool with purpose and JSON example. It also enforces communication style and tool-calling etiquette (human response first, one tool per line, double-quoted JSON).
+
+4. **Model call**  
+   We run `openai.chat.completions.create()` with the system prompt + user message (model: `gpt-4o-mini`, temperature 0.2).
+
+5. **Tool extraction**  
+   `extractFunctionCalls()` scans the response for `[ToolName]` tokens followed by JSON blocks. The natural-language portion is kept as `finalReply`.
+
+6. **Execution + logging**  
+   For each tool:
+   - Log to console with payload preview.
+   - Notify Slack: `🤖 AI triggered tool [ToolName]`.
+   - Parse JSON payload (if present).
+   - Execute the handler from the `FunctionRegistry`.
+   - Record success/error metadata for debugging.
+
+7. **Human response**  
+   The cleaned natural-language reply is always sent to Slack, even if no tool ran.
+
+---
+
+## Tool Catalog
+
+All tools live in `src/functions/` and are registered via `registerCoreFunctions()`:
+
+| Tool | Description | Example Payload |
+| ---- | ----------- | ---------------- |
+| `CreateTask` | Normalize and persist a task based on AI-provided details. Posts a confirmation card. | `{"title": "Prepare Q4 forecast", "dueTime": "2025-01-05T14:00:00-05:00", "assignee": "<@U123>"}` |
+| `ListTasks` | Show pending/completed/all tasks for the requester using Block Kit. | `{"scope": "completed"}` |
+| `DeleteTask` | Permanently remove a task by `taskId`. Notifies channel. | `{"taskId": "clxyz123"}` |
+| `UpdateTaskStatus` | Mark a task complete or pending with optional note. | `{"taskId": "clxyz123", "completed": false, "note": "Need more data."}` |
+
+Each handler receives (`args`, `context`) and returns `{ status, message, data? }`. Handlers are responsible for validating inputs and providing user-facing feedback.
+
+---
+
+## Project Structure
 
 ```
 src/
-  actions/
-    taskActions.ts           # Button actions: complete/delay handlers
-  db/
-    writeTask.ts             # Create task in DB after parsing
-  gpt/
-    parseTask.ts             # LLM transform: text → structured task JSON
-  scheduler/
-    taskReminder.ts          # Runs every minute; posts reminder cards
+  actions/              # Slack interactive button handlers (complete, delay, etc.)
+  ai/
+    openaiClient.ts     # OpenAI SDK client with env-driven API key
+    prompt.ts           # System prompt builder for the AI COO
+  orchestrator/
+    functionRegistry.ts # Tool registration + execution context definitions
+    parseAiResponse.ts  # Extracts [Tool] tokens + JSON payloads
+    runAiOrchestrator.ts# Core AI decision loop
+  functions/
+    createTask.ts       # Tool implementations (AI-callable)
+    deleteTask.ts
+    listTasks.ts
+    updateTaskStatus.ts
+    index.ts            # Registers the catalog with the FunctionRegistry
   slack/
-    sendMessage.ts           # Plain text messages (generic helper)
-    postTaskReminder.ts      # Post Block Kit reminder card
-  ui/
-    taskCard.ts              # Block Kit UI builder for the reminder card
+    listTasks.ts        # Shared Block Kit builders for task listings
+  scheduler/
+    taskReminder.ts     # Cron-driven reminder sender (unchanged)
+  services/
+    normalizeTask.ts    # Task normalization logic reused by CreateTask
+  db/
+    writeTask.ts        # Prisma task persistence helper
   utils/
-    assignee.ts              # Normalize assignee to <@UXXXX>
-  index.ts                   # Entry point (Bolt + ExpressReceiver + cron)
+    assignee.ts         # Slack mention utilities
+  index.ts              # Slack Bolt entrypoint, orchestrator wiring, message routing
 prisma/
-  schema.prisma              # Task model definition
-.env.example                 # Example env file (no secrets)
-.gitignore                   # Ensures .env and other files are not committed
-README.md                    # This document
+  schema.prisma         # Task model
+.env.example            # Sample environment configuration
 ```
 
 ---
 
 ## Prerequisites
 
-* Node.js **18+** and npm
-* A Slack **workspace** where you can create and install apps
-* Supabase account & project (PostgreSQL)
-* LLM API key (OpenAI or Claude; examples use OpenAI)
+- Node.js 18+
+- npm
+- A Slack workspace where you can create/install custom apps
+- PostgreSQL database (Supabase recommended)
+- OpenAI API key
+- ngrok (for local testing)
 
 ---
 
-## Security First (.env & .gitignore)
+## Environment Variables
 
-**Never commit secrets.** Make sure `.gitignore` contains:
-
-```
-# Node
-node_modules/
-dist/
-build/
-*.log
-.DS_Store
-
-# Env
-.env
-.env.*
-!.env.example
-
-# TypeScript
-*.tsbuildinfo
-```
-
-Create `.env.example` with variable names only (no real tokens):
-
-```
-PORT=3000
-SLACK_BOT_TOKEN=
-SLACK_SIGNING_SECRET=
-OPENAI_API_KEY=
-DATABASE_URL=
-SUPABASE_URL=
-```
-
-Your real `.env` stays **local** or in your cloud provider as **secrets**.
-
----
-
-## Step 1 — Clone & Install
-
-```bash
-git clone <your-repo-url>
-cd <repo-folder>
-npm i
-```
-
----
-
-## Step 2 — Create & Configure Your Slack App
-
-1. Go to **[https://api.slack.com/apps](https://api.slack.com/apps)** → **Create New App** → **From scratch**.
-2. Choose your Workspace, name the app (e.g., `AI COO`).
-3. **OAuth & Permissions → Scopes (Bot Token Scopes)**:
-
-   * Required: `chat:write`, `app_mentions:read`
-   * Recommended for later: `users:read`, `commands`
-   * Click **Install to Workspace** (top of page) and copy the **Bot User OAuth Token** (looks like `xoxb-...`).
-4. **Basic Information**: copy your **Signing Secret**.
-5. **Event Subscriptions**:
-
-   * Enable Events: **On**
-   * Request URL: will be set to your **ngrok URL** later → `https://<ngrok-id>.ngrok.io/slack/events`
-   * **Subscribe to bot events**: add `app_mention`
-   * Save
-6. **Interactivity & Shortcuts**:
-
-   * Interactivity: **On**
-   * Request URL: same as Event Subscriptions → `https://<ngrok-id>.ngrok.io/slack/events`
-   * Save
-
-> Bolt’s ExpressReceiver can receive both events and interactive payloads on the same endpoint.
-
----
-
-## Step 3 — Environment Variables
-
-Create your local `.env` (do **not** commit):
+Create `.env` (never commit secrets):
 
 ```
 PORT=3000
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
 OPENAI_API_KEY=...
-DATABASE_URL=postgresql://postgres:<YOUR_DB_PASSWORD>@db.<project-ref>.supabase.co:5432/postgres
-SUPABASE_URL=<optional-if-used>
+DATABASE_URL=postgresql://postgres:<PASSWORD>@db.<ref>.supabase.co:5432/postgres
 ```
+
+Optional extras (if you reuse them elsewhere):
+`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, etc.
 
 ---
 
-## Step 4 — Database (Supabase + Prisma)
+## Slack App Setup
 
-1. Create a **Supabase** project. In **Project Settings → API**, note your project ref and DB password.
-2. Set `DATABASE_URL` in `.env` as above.
-3. Define your Prisma schema in `prisma/schema.prisma`:
+1. Visit [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
+2. In **OAuth & Permissions**, add bot scopes: `chat:write`, `app_mentions:read`, `im:history`, `im:read`.
+3. Install the app and copy:
+   - **Bot User OAuth Token** (`SLACK_BOT_TOKEN`)
+   - **Signing Secret** (`SLACK_SIGNING_SECRET`)
+4. Under **Event Subscriptions**:
+   - Enable events.
+   - Request URL → later set to `https://<ngrok-id>.ngrok.io/slack/events`.
+   - Subscribe to bot events: `app_mention`, `message.im`.
+5. Under **Interactivity & Shortcuts**:
+   - Enable interactivity.
+   - Same request URL.
+6. Invite the bot to the channels where you want it to operate.
 
-```prisma
-generator client {
-  provider = "prisma-client-js"
-}
+---
 
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-model Task {
-  id          String   @id @default(cuid())
-  title       String
-  time        DateTime
-  assignee    String    // use Slack user ID or mention string
-  channelId   String
-  createdBy   String    // Slack user ID who created the task
-  createdAt   DateTime  @default(now())
-  completed   Boolean   @default(false)
-}
-```
-
-4. Push the schema to your DB:
+## Local Development
 
 ```bash
+# 1. Install dependencies
+npm install
+
+# 2. Generate Prisma client & sync schema
 npx prisma db push
-```
 
----
-
-## Step 5 — Run Locally (Nodemon + Ngrok)
-
-1. Start the app locally:
-
-```bash
+# 3. Start the Dev server with auto-reload
 npx nodemon
-```
 
-You should see: `⚡ Slack app is running!`
-
-2. Start **ngrok** in a separate terminal:
-
-```bash
+# 4. Expose locally via ngrok (in a new terminal)
 ngrok http 3000
 ```
 
-Copy the HTTPS URL (e.g., `https://<id>.ngrok.io`).
-
-3. Back in **Slack App settings**:
-
-   * **Event Subscriptions → Request URL**: `https://<id>.ngrok.io/slack/events` → Save (Slack must verify OK)
-   * **Interactivity & Shortcuts → Request URL**: `https://<id>.ngrok.io/slack/events` → Save
-
-> If Slack cannot verify: ensure your local server is running on PORT=3000 and ngrok targets 3000.
-
----
-
-## Step 6 — End-to-End Test
-
-In your Slack workspace, in any channel where the bot is present, type:
+Update Slack’s Request URLs with the ngrok HTTPS endpoint, then mention the bot in Slack:
 
 ```
-@AI COO  Tomorrow 9am remind me to discuss product progress with Alex
+@AI COO draft a task to review Q4 forecast with finance tomorrow at 9am PT
 ```
 
-Expect in your server logs:
-
-* Parsed task JSON
-* `✅ Task saved` (Prisma → Supabase)
-
-At the task time (±1 minute), the channel will receive a **Block Kit reminder card**.
-Click **Complete** or **Delay** and verify:
-
-* You receive an **ephemeral** confirmation.
-* DB reflects `completed=true` or a new `time` (+15m or +60m).
+You should see:
+- Slack response from the AI
+- Console log: `🤖 AI triggered tool [CreateTask] with payload: ...`
+- Slack notification about the triggered tool
+- Task card confirming creation
 
 ---
 
-## Step 7 — Scheduled Reminders (node-cron)
+## Monitoring Tool Invocations
 
-* The scheduler runs every minute and checks for tasks with `time` within `[now-1m, now+1m]` and `completed=false`.
-* It posts the reminder card via `chat.postMessage` using your **Block Kit** builder.
-* To avoid duplicates in the future, you can add fields like `notifiedAt` or `remindCount` (not required for MVP).
+Every AI-triggered tool generates two signals:
 
----
+1. **Console log**  
+   ```
+   🤖 AI triggered tool [CreateTask] with payload: {"title":"..."}
+   ```
+2. **Slack notification**  
+   The bot posts `🤖 AI triggered tool [CreateTask]` in the same thread, so the team sees what automation just ran.
 
-## Step 8 — Interactive Actions (Complete / Delay)
-
-* Buttons carry `action_id`s: `task_complete`, `task_delay_15m`, `task_delay_60m`.
-* `app.action(...)` handlers **must call `ack()`** within 3 seconds.
-* On success, update Prisma, then send an ephemeral confirmation via `client.chat.postEphemeral`.
-
----
-
-## Troubleshooting & Pitfalls
-
-**Request URL verification fails**
-
-* Local app not running; ngrok not started or wrong port.
-* URL must be `https://<id>.ngrok.io/slack/events` and publicly reachable.
-
-**Button clicks do nothing**
-
-* Missing `ack()`; Slack retries if no ack within 3 seconds.
-* Interactivity disabled or wrong URL.
-* Your `app.action('...')` handlers are not registered before `app.start()`.
-
-**Mentions show incorrectly**
-
-* Normalize `assignee` to `<@UXXXX>` before rendering. Use a helper like `toSlackMention()` that extracts a Slack user ID.
-
-**Time zones**
-
-* DB stores UTC. UI currently uses `toLocaleString()`; switch to a timezone-aware formatter later.
-
-**Repeat reminders**
-
-* Current strategy is a ±1 minute window. Add `notifiedAt`/`remindCount` fields if you need strict de-duplication.
-
-**Missing permissions**
-
-* Ensure `chat:write` and `app_mentions:read` are in **Bot Token Scopes** and the app is **reinstalled** after scope changes.
+If parsing fails or a tool is unknown, the orchestrator logs an error and records it in `toolResults`.
 
 ---
 
-## Deploy to Railway/Render
+## Adding New Tools
 
-> Replace ngrok with a permanent cloud URL and update Slack settings accordingly.
+1. Create a file in `src/functions/`, e.g. `scheduleStandup.ts`.
+2. Export `RegisteredFunction`:
+   ```ts
+   import { RegisteredFunction } from '../orchestrator/functionRegistry';
 
-### Railway (example)
+   export function scheduleStandupFunction(): RegisteredFunction {
+     return {
+       name: 'ScheduleStandup',
+       description: 'Book a daily standup meeting in Google Calendar.',
+       inputExample: '{"time": "09:30", "attendees": ["<@U123>", "<@U456>"]}',
+       handler: async (args, context) => {
+         // validate args, call integrations, send Slack updates, return status
+       },
+     };
+   }
+   ```
+3. Register it in `src/functions/index.ts`:
+   ```ts
+   registry.register(scheduleStandupFunction());
+   ```
+4. Update prompt guidance (optional but recommended) so the AI knows when to use the tool.
 
-1. Create a Railway project from your GitHub repo.
-2. Railway detects Node; set **Variables (ENV)**:
-
-   * `PORT=3000`
-   * `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `OPENAI_API_KEY`, `DATABASE_URL`
-3. Deploy; get a public domain (e.g., `https://yourapp.up.railway.app`).
-4. In Slack App settings:
-
-   * **Event Subscriptions / Interactivity** → `https://yourapp.up.railway.app/slack/events` → Save
-5. Invite the bot to your channels and test again (no ngrok needed).
-
-### Render (alternative)
-
-1. New → **Web Service** → Connect your repo.
-2. Environment → add the same variables as above.
-3. Deploy → get public URL → update Slack URLs → test.
-
-**Notes**
-
-* Always store secrets in the cloud provider’s environment settings (never commit them).
-* Check logs in Railway/Render if Slack verification or runtime requests fail.
+The tool automatically appears in the system prompt with purpose + example, so the AI can choose it.
 
 ---
 
-## Push to GitHub (Safe & Repeatable)
-
-> If you have already pushed once, follow only the **Commit & Push** part.
-
-### One-time setup
+## Testing
 
 ```bash
-git init -b main            # or: git init && git checkout -b main
-git remote add origin https://github.com/<you>/<repo>.git
+npm run test
 ```
 
-### Ensure `.env` is ignored
+> Note: if running inside a restricted sandbox, `vitest` may fail to kill worker processes (EPERM). Re-run locally outside the sandbox to validate.
 
-`.gitignore` must include `.env`. If you accidentally added it:
-
-```bash
-git rm --cached .env
-```
-
-### Commit & Push
-
-```bash
-git add -A
-git commit -m "docs: add full English README and deployment guide"
-git push -u origin main
-```
-
-### If you accidentally pushed secrets
-
-1. **Rotate** the leaked tokens in Slack/OpenAI/Supabase immediately.
-2. Rewrite history to remove files (e.g., with `git filter-repo` or BFG) and force-push.
-3. Document the rotation in your internal notes.
-
-### Optional: tags & releases
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-Create a GitHub Release from this tag with change notes.
+Future work: add integration tests that mock OpenAI and Slack, verifying consistent tool invocation and DB interactions.
 
 ---
 
-## Team Onboarding Checklist
+## Deployment Notes
 
-1. Clone repo → `npm i`.
-2. Copy `.env.example` → `.env`, fill values.
-3. `npx prisma db push`.
-4. `npx nodemon` (see `⚡ Slack app is running!`).
-5. `ngrok http 3000` and update Slack URLs.
-6. In Slack: `@AI COO  Tomorrow 9am remind me to ...`.
-7. At the time window, check the reminder card → click Complete/Delay.
-8. Verify ephemeral confirmation and DB updates.
+- Any Node-friendly host (Render, Railway, Fly.io, AWS) works. Ensure `PORT` matches your host’s expectations.
+- Slack request URLs must use your public HTTPS endpoint: `https://yourdomain.com/slack/events`.
+- Keep secrets in the host’s environment settings (never commit them).
+- When you deploy a new prompt or tool, redeploy the service so the runtime picks up the changes.
 
 ---
 
-## Extensibility: Next Milestones
+## Roadmap Ideas
 
-* **Daily rollups** (6pm): summarize completed/overdue/tomorrow’s plan → post to a leader channel.
-* **Weekly reports**: aggregate by assignee, team, labels.
-* **Owners & labels**: multiple assignees; task categories.
-* **Advance reminders**: e.g., 15m before; configurable windows.
-* **De-dup**: add `notifiedAt`/`remindCount` to enforce once-only reminders.
-* **Connectors**: Notion, Google Calendar, Jira, email digests.
-* **Observability**: structured logs, audit tables.
+- **Tool execution guardrails**: add allow/deny lists or approvals before certain tools run.
+- **Stateful memory**: maintain context across conversations (e.g., current priorities, OKRs).
+- **Advanced analytics**: summarize task load, overdue items, or generate weekly exec readouts.
+- **External connectors**: integrate Notion, Jira, Google Calendar, HubSpot, or email digests.
+- **Observability**: stream tool invocations to a datastore for auditing.
+- **Self-healing prompts**: version prompts, capture AI mistakes, and auto-retrain with better instructions.
 
 ---
 
-## License
-
-Choose one:
-
-* **MIT** (open source), or
-* proprietary (private)
+Built to evolve: treat prompts like playbooks and functions like toolboxes. As you teach the AI new procedures, it becomes a real operations teammate.***
