@@ -1,16 +1,18 @@
 import { openai } from '../ai/openaiClient';
 import { buildSystemPrompt } from '../ai/prompt';
 import { FunctionExecutionContext, FunctionExecutionResult, FunctionRegistry } from './functionRegistry';
+import { ConversationMessage } from './conversationStore';
 import { extractFunctionCalls } from './parseAiResponse';
 
 export type OrchestratorInput = {
   registry: FunctionRegistry;
-  userMessage: string;
+  messages: ConversationMessage[];
   context: FunctionExecutionContext;
 };
 
 export type OrchestratorOutput = {
   finalReply: string;
+  rawResponse: string;
   toolResults: Array<{
     name: string;
     status: FunctionExecutionResult['status'];
@@ -21,7 +23,7 @@ export type OrchestratorOutput = {
 export async function runAiOrchestrator(
   input: OrchestratorInput
 ): Promise<OrchestratorOutput> {
-  const { registry, userMessage, context } = input;
+  const { registry, messages, context } = input;
   const functions = registry.list();
 
   const systemPrompt = buildSystemPrompt(functions, {
@@ -35,7 +37,10 @@ export async function runAiOrchestrator(
     temperature: 0.2,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage },
+      ...messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
     ],
   });
 
@@ -98,6 +103,7 @@ export async function runAiOrchestrator(
 
   return {
     finalReply: cleanedText || 'Noted.',
+    rawResponse: response,
     toolResults,
   };
 }
