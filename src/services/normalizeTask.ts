@@ -73,11 +73,6 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
     }
   }
   
-  // If no assignees were found in the array, use the primary assignee
-  if (assignees.length === 0 && assignee) {
-    assignees.push(assignee);
-  }
-
   // Prevent assigning the bot to itself; fall back to requester (createdBy)
   const botId = process.env.SLACK_BOT_USER_ID;
   if (botId && assignee === botId) {
@@ -95,8 +90,16 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
   if (!assignee) {
     assignee = input.createdBy;
   }
-  if (!assignees.includes(assignee)) {
+  // Do not duplicate the primary assignee in the assignees array.
+  // If the array is empty, include the primary; otherwise remove any accidental primary.
+  if (assignees.length === 0 && assignee) {
     assignees.push(assignee);
+  } else {
+    for (let i = assignees.length - 1; i >= 0; i--) {
+      if (assignees[i] === assignee) {
+        assignees.splice(i, 1);
+      }
+    }
   }
 
   let when: Date | null = null;

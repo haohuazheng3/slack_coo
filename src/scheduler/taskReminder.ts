@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { WebClient } from '@slack/web-api';
 import { buildTaskBlocks } from '../ui/taskCard';
 import { computeReminderLeadMs } from './reminderPolicy';
+import { generateReminderIntro } from '../ai/generateReminderIntro';
 
 dotenv.config();
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
@@ -57,27 +58,44 @@ export function startTaskReminderScheduler() {
         // Fire within window or catch-up up to 5 minutes late if missed while app was down
         if (shouldSend) {
           try {
-            const blocks = buildTaskBlocks({
-              id: task.id,
+            const intro = await generateReminderIntro({
               title: task.title,
-              time: task.time,
-              assignee: task.assignee,
-              assignees: task.assignees,
+              dueTime: task.time,
             });
 
-            // Open IM channel to DM the assignee properly (fallback to createdBy if assignee is the bot)
+            // Determine recipients: DM all assignees if provided; otherwise DM the primary assignee
             const botId = process.env.SLACK_BOT_USER_ID;
-            const dmUser = botId && task.assignee === botId ? task.createdBy : task.assignee;
-            const conv = await slack.conversations.open({ users: dmUser });
-            const dmChannel = (conv as any).channel?.id || dmUser;
+            const primaryDmUser = botId && task.assignee === botId ? task.createdBy : task.assignee;
+            const recipients = (task.assignees && task.assignees.length > 0)
+              ? Array.from(new Set(task.assignees))
+              : [primaryDmUser];
 
-            console.log("[ReminderSend]", { user: dmUser, dmChannel });
+            for (const userId of recipients) {
+              const conv = await slack.conversations.open({ users: userId });
+              const dmChannel = (conv as any).channel?.id || userId;
 
-            await slack.chat.postMessage({
-              channel: dmChannel,
-              text: `🔔 Upcoming task: ${task.title}`,
-              blocks,
-            });
+              console.log("[ReminderSend]", { user: userId, dmChannel });
+
+              const blocks = [
+                {
+                  type: "section",
+                  text: { type: "mrkdwn", text: intro }
+                },
+                ...buildTaskBlocks({
+                  id: task.id,
+                  title: task.title,
+                  time: task.time,
+                  assignee: userId,
+                  assignees: task.assignees,
+                })
+              ] as any[];
+
+              await slack.chat.postMessage({
+                channel: dmChannel,
+                text: `🔔 Upcoming task: ${task.title}`,
+                blocks,
+              });
+            }
 
             await prisma.task.update({
               where: { id: task.id },

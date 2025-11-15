@@ -32,7 +32,7 @@ export function buildTaskBlocks(task: {
           type: "button",
           text: { type: "plain_text", text: "Completed ✅" },
           style: "primary",
-          action_id: "task_completed",
+          action_id: "task_complete",
           value: task.id
         },
         {
