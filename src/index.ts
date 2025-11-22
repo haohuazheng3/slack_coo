@@ -7,6 +7,7 @@ import { FunctionRegistry } from './orchestrator/functionRegistry';
 import { registerCoreFunctions } from './functions';
 import { runAiOrchestrator } from './orchestrator/runAiOrchestrator';
 import { buildTaskListMessage } from './slack/listTasks';
+import { conversationStore } from './orchestrator/conversationStore';
 
 dotenv.config();
 
@@ -157,6 +158,7 @@ app.event('app_mention', async ({ event, client }) => {
   const channelId = requireString((event as any).channel, 'event.channel');
   const threadTs = ((event as any).thread_ts || event.ts) as string;
   const originalText = event.text || '';
+  const conversationKey = getConversationKey(channelId, (event as any).thread_ts, event.ts);
 
   const botId = process.env.SLACK_BOT_USER_ID;
   const sanitizedText = botId
@@ -181,13 +183,16 @@ app.event('app_mention', async ({ event, client }) => {
     });
   };
 
+  const userMessagePayload = buildUserMessagePayload({
+    userId,
+    channelId,
+    text: sanitizedText || originalText,
+  });
+  conversationStore.append(conversationKey, { role: 'user', content: userMessagePayload });
+
   const orchestratorResult = await runAiOrchestrator({
     registry: functionRegistry,
-    userMessage: buildUserMessagePayload({
-      userId,
-      channelId,
-      text: sanitizedText || originalText,
-    }),
+    messages: conversationStore.get(conversationKey),
     context: {
       slack: {
         client,
@@ -203,6 +208,13 @@ app.event('app_mention', async ({ event, client }) => {
 
   if (orchestratorResult.finalReply) {
     await send(orchestratorResult.finalReply);
+  }
+
+  if (orchestratorResult.finalReply) {
+    conversationStore.append(conversationKey, {
+      role: 'assistant',
+      content: orchestratorResult.finalReply,
+    });
   }
 
   for (const tool of orchestratorResult.toolResults) {
@@ -249,9 +261,17 @@ app.message(async ({ message, client }) => {
     return;
   }
 
+  const messageThreadTs = (message as any).thread_ts as string | undefined;
+  const conversationKey = getConversationKey(channelId, messageThreadTs, ts);
+
   const isDirectMessage = channelId.startsWith('D');
   if (!isDirectMessage) {
-    return;
+    if (!messageThreadTs) {
+      return;
+    }
+    if (!conversationStore.has(conversationKey)) {
+      return;
+    }
   }
 
   const send = async (message: string | { text?: string; blocks?: any[] }) => {
@@ -272,13 +292,16 @@ app.message(async ({ message, client }) => {
     });
   };
 
+  const userMessagePayload = buildUserMessagePayload({
+    userId,
+    channelId,
+    text,
+  });
+  conversationStore.append(conversationKey, { role: 'user', content: userMessagePayload });
+
   const orchestratorResult = await runAiOrchestrator({
     registry: functionRegistry,
-    userMessage: buildUserMessagePayload({
-      userId,
-      channelId,
-      text,
-    }),
+    messages: conversationStore.get(conversationKey),
     context: {
       slack: {
         client,
@@ -294,6 +317,13 @@ app.message(async ({ message, client }) => {
 
   if (orchestratorResult.finalReply) {
     await send(orchestratorResult.finalReply);
+  }
+
+  if (orchestratorResult.finalReply) {
+    conversationStore.append(conversationKey, {
+      role: 'assistant',
+      content: orchestratorResult.finalReply,
+    });
   }
 
   for (const tool of orchestratorResult.toolResults) {
@@ -345,3 +375,13 @@ function buildUserMessagePayload(payload: {
     ),
   ].join('\n');
 }
+function getConversationKey(channelId: string, threadTs?: string, ts?: string): string {
+  if (threadTs) {
+    return `${channelId}:${threadTs}`;
+  }
+  if (channelId.startsWith('D')) {
+    return `DM:${channelId}`;
+  }
+  return `${channelId}:${ts ?? 'root'}`;
+}
+

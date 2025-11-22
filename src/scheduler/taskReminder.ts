@@ -2,8 +2,8 @@ import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import { WebClient } from '@slack/web-api';
-import { buildTaskBlocks } from '../ui/taskCard';
 import { computeReminderLeadMs } from './reminderPolicy';
+import { toSlackMention } from '../utils/assignee';
 
 dotenv.config();
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
@@ -57,14 +57,6 @@ export function startTaskReminderScheduler() {
         // Fire within window or catch-up up to 5 minutes late if missed while app was down
         if (shouldSend) {
           try {
-            const blocks = buildTaskBlocks({
-              id: task.id,
-              title: task.title,
-              time: task.time,
-              assignee: task.assignee,
-              assignees: task.assignees,
-            });
-
             // Open IM channel to DM the assignee properly (fallback to createdBy if assignee is the bot)
             const botId = process.env.SLACK_BOT_USER_ID;
             const dmUser = botId && task.assignee === botId ? task.createdBy : task.assignee;
@@ -73,10 +65,14 @@ export function startTaskReminderScheduler() {
 
             console.log("[ReminderSend]", { user: dmUser, dmChannel });
 
+            const assigneeMentions =
+              Array.isArray(task.assignees) && task.assignees.length > 0
+                ? task.assignees.map((a) => toSlackMention(a)).join(', ')
+                : toSlackMention(task.assignee);
+
             await slack.chat.postMessage({
               channel: dmChannel,
-              text: `🔔 Upcoming task: ${task.title}`,
-              blocks,
+              text: `🔔 Reminder: ${task.title}\n• Due: ${task.time.toLocaleString()}\n• Assignees: ${assigneeMentions}`,
             });
 
             await prisma.task.update({

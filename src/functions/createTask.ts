@@ -80,6 +80,35 @@ export function createTaskFunction(): RegisteredFunction {
         ],
       });
 
+      try {
+        const dmChannel = await context.slack.client.conversations.open({
+          users: created.assignee,
+        });
+        const channelId = (dmChannel.channel as any)?.id;
+        if (channelId) {
+          const assigneeMentions =
+            created.assignees && created.assignees.length > 0
+              ? created.assignees.map((a) => toSlackMention(a)).join(', ')
+              : toSlackMention(created.assignee);
+
+          await context.slack.client.chat.postMessage({
+            channel: channelId,
+            text: `🔔 Reminder: ${created.title}\n\n• Due: ${timeText}\n• Assignees: ${assigneeMentions}`,
+          });
+        }
+      } catch (error) {
+        console.error('Failed to send DM to task assignee', error);
+      }
+
+      try {
+        await context.prisma.task.update({
+          where: { id: created.id },
+          data: { deadlineReminderSentAt: new Date() },
+        });
+      } catch (error) {
+        console.error('Failed to mark reminder as sent on task creation', error);
+      }
+
       return {
         status: 'success',
         message: `Created task "${created.title}" for ${mention}.`,

@@ -37,6 +37,10 @@ Tool usage rules:
 4. If you do not need a tool, simply respond with guidance or clarifying questions. Never hallucinate tool names.
 5. Always include a short natural-language response for the human after any tool calls. The human reply should come first, followed by tool calls if any.
 
+List handling:
+- When a user asks for "the list" without context, assume they mean the current task list unless they clearly specify another type.
+- Offer follow-up clarification only if their wording is ambiguous between multiple known lists (e.g., tasks vs. projects).
+
 Context for this conversation:
 - Current ISO time: ${context.currentIsoTime}
 - Slack user mention: ${context.userMention}
