@@ -2,7 +2,7 @@
 // Purpose: Convert GPT output (which may have inconsistent field names and relative times)
 // into a normalized object ready for database insertion: { title, time(Date), assignee, channelId, createdBy }
 
-function parseRelativeTimeToDate(input: string, base = new Date()): Date | null {
+export function parseRelativeTimeToDate(input: string, base = new Date()): Date | null {
   if (!input) return null;
   const s = input.trim().toLowerCase();
 
@@ -48,6 +48,7 @@ export type ParsedTaskInput = {
   reminder_time?: string;   // If user said "2 minutes later", capture this
   assignee?: string;        // Primary assignee, ideally "<@UXXXX>"
   assignees?: string[];     // All mentioned users, ideally ["<@UXXXX>", "<@UYYYY>"]
+  initiator?: string;       // User who requested the task, Slack mention or ID
   channelId: string;
   createdBy: string;
   rawText?: string;         // Original text, used as fallback
@@ -99,6 +100,14 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
     assignees.push(assignee);
   }
 
+  let initiator = (input.initiator || input.createdBy || '').trim();
+  const initiatorMatch = initiator.match(/U[A-Z0-9]+/i);
+  if (initiatorMatch) {
+    initiator = initiatorMatch[0].toUpperCase();
+  } else if (!initiator) {
+    initiator = input.createdBy;
+  }
+
   let when: Date | null = null;
 
   if (input.time) {
@@ -126,5 +135,6 @@ export function normalizeToDBTask(input: ParsedTaskInput) {
     assignees,
     channelId: input.channelId,
     createdBy: input.createdBy,
+    initiator,
   };
 }

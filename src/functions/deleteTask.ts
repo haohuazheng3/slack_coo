@@ -1,4 +1,5 @@
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
+import { refreshOwnerHome } from '../slack/taskCardUpdater';
 
 type DeleteTaskArgs = {
   taskId: string;
@@ -7,11 +8,11 @@ type DeleteTaskArgs = {
 export function deleteTaskFunction(): RegisteredFunction {
   return {
     name: 'DeleteTask',
-    description: 'Remove a task permanently when it is no longer needed. Requires the taskId.',
-    inputExample: '{"taskId": "clxyz123"}',
+    description:
+      'Permanently remove a task. Use only when the owner explicitly asks to delete (not "cancel" — for that, use [UpdateTaskStatus] with status=CANCELLED).',
+    inputExample: '{"taskId":"clxyz123"}',
     handler: async (args: DeleteTaskArgs, context) => {
       const taskId = args?.taskId;
-
       if (!taskId || typeof taskId !== 'string') {
         return {
           status: 'error',
@@ -19,7 +20,12 @@ export function deleteTaskFunction(): RegisteredFunction {
         };
       }
 
+      let existing;
       try {
+        existing = await context.prisma.task.findUnique({ where: { id: taskId } });
+        if (!existing) {
+          return { status: 'error', message: `Task ${taskId} not found.` };
+        }
         await context.prisma.task.delete({ where: { id: taskId } });
       } catch (error: any) {
         return {
@@ -28,13 +34,16 @@ export function deleteTaskFunction(): RegisteredFunction {
         };
       }
 
-      await context.slack.send(`🗑️ Task ${taskId} deleted.`);
+      await context.slack.send(`🗑️ Deleted task *${existing.title}*.`);
+
+      const ownerId = existing.initiator || existing.createdBy;
+      if (ownerId) refreshOwnerHome(context.slack.client, ownerId).catch(() => undefined);
 
       return {
         status: 'success',
-        message: `Deleted task ${taskId}.`,
+        message: `Deleted task "${existing.title}".`,
+        data: { taskId, action: 'deleted' },
       };
     },
   };
 }
-

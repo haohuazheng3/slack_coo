@@ -1,387 +1,225 @@
-import { App, ExpressReceiver, BlockAction, ButtonAction } from '@slack/bolt';
+import { App, ExpressReceiver, LogLevel as BoltLogLevel } from '@slack/bolt';
 import dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
-import { registerTaskActions } from './actions/taskActions';
-import { startTaskReminderScheduler } from './scheduler/taskReminder';
+
+import { prisma } from './lib/prisma';
+import { createLogger } from './lib/logger';
+import { getBotUserId } from './lib/slackClient';
+
 import { FunctionRegistry } from './orchestrator/functionRegistry';
 import { registerCoreFunctions } from './functions';
-import { runAiOrchestrator } from './orchestrator/runAiOrchestrator';
-import { buildTaskListMessage } from './slack/listTasks';
+import { handleConversationTurn } from './orchestrator/handleConversationTurn';
 import { conversationStore } from './orchestrator/conversationStore';
+
+import { startTaskReminderScheduler } from './scheduler/taskReminder';
+import { startProgressCheckScheduler } from './scheduler/progressCheck';
+
+import {
+  registerActions,
+  isAwaitingReasonFromUser,
+  consumeReasonReply,
+} from './slack/actions';
+import { buildHomeView } from './slack/homeView';
+import { getConversationKey } from './lib/sendHelpers';
+
+import { prismaInstallationStore } from './installation/installationStore';
+import { failureHtml, installLandingHtml, sendHtml, successHtml } from './installation/pages';
 
 dotenv.config();
 
-const prisma = new PrismaClient();
+const log = createLogger('App');
+
+const requiredEnv = [
+  'SLACK_CLIENT_ID',
+  'SLACK_CLIENT_SECRET',
+  'SLACK_SIGNING_SECRET',
+  'SLACK_STATE_SECRET',
+  'OPENAI_API_KEY',
+  'DATABASE_URL',
+];
+for (const k of requiredEnv) {
+  if (!process.env[k]) {
+    console.error(`Missing required env var: ${k}`);
+    process.exit(1);
+  }
+}
+
+const BOT_SCOPES = [
+  'app_mentions:read',
+  'chat:write',
+  'chat:write.public',
+  'im:history',
+  'im:read',
+  'im:write',
+  'users:read',
+];
+
+const PORT = Number(process.env.PORT) || 3030;
+const BASE_URL = process.env.BASE_URL?.replace(/\/$/, '') || '';
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET!,
+  clientId: process.env.SLACK_CLIENT_ID!,
+  clientSecret: process.env.SLACK_CLIENT_SECRET!,
+  stateSecret: process.env.SLACK_STATE_SECRET!,
+  scopes: BOT_SCOPES,
+  installationStore: prismaInstallationStore,
+  installerOptions: {
+    directInstall: true,
+    redirectUriPath: '/slack/oauth_redirect',
+    installPath: '/slack/install',
+    callbackOptions: {
+      success: (_installation, _options, _req, res) => {
+        sendHtml(res as any, successHtml());
+      },
+      failure: (error, _options, _req, res) => {
+        sendHtml(res as any, failureHtml(error?.message ?? String(error)), 500);
+      },
+    },
+  },
+  endpoints: {
+    events: '/slack/events',
+  },
+  logLevel: (process.env.BOLT_LOG_LEVEL as BoltLogLevel) ?? BoltLogLevel.WARN,
 });
 
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN!,
-  receiver,
-});
+const app = new App({ receiver });
 
 const functionRegistry = new FunctionRegistry();
 registerCoreFunctions(functionRegistry);
 
-const pendingTaskReasons = new Map<string, string>();
+registerActions(app, functionRegistry);
 
-app.action<BlockAction<ButtonAction>>('task_completed', async ({ ack, body, client }) => {
-  await ack();
-  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
-
-  await prisma.task.update({
-    where: { id: taskId },
-    data: { completed: true },
-  });
-
-  await client.chat.postMessage({
-    channel: body.user.id,
-    text: '✅ Task marked as completed!',
-  });
+receiver.router.get('/healthz', (_req, res) => {
+  res.status(200).json({ ok: true, time: new Date().toISOString() });
 });
 
-app.action<BlockAction<ButtonAction>>('task_not_completed', async ({ ack, body, client }) => {
-  await ack();
-  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
-  if (!taskId) {
-    console.error('Task ID missing for task_not_completed action');
-    await client.chat.postMessage({
-      channel: body.user.id,
-      text: '❌ Unable to record the reason because the task ID was missing. Please try again.',
-    });
-    return;
-  }
-
-  pendingTaskReasons.set(body.user.id, taskId);
-
-  await client.chat.postMessage({
-    channel: body.user.id,
-    text: '❌ Please provide a short reason (1–2 sentences) why the task was not completed.',
-  });
+receiver.router.get('/', (_req, res) => {
+  const installUrl = BASE_URL
+    ? `${BASE_URL}/slack/install`
+    : '/slack/install';
+  sendHtml(res, installLandingHtml(installUrl));
 });
 
-app.action<BlockAction<ButtonAction>>('list_tasks', async ({ ack, body, client }) => {
-  await ack();
-  const userId = (body as BlockAction<ButtonAction>).actions[0].value;
+app.event('app_mention', async ({ event, client, context }) => {
+  const userId = (event as any).user as string | undefined;
+  const channelId = (event as any).channel as string | undefined;
+  const text = ((event as any).text as string | undefined) ?? '';
+  const ts = (event as any).ts as string | undefined;
+  const incomingThreadTs = (event as any).thread_ts as string | undefined;
 
-  if (!userId) {
-    console.error('No user ID found in list_tasks button value');
-    return;
-  }
+  if (!userId || !channelId) return;
 
-  const message = await buildTaskListMessage(prisma, userId, {
-    showCompleted: false,
-    showAll: false,
-  });
+  const teamId = context.teamId ?? null;
+  const enterpriseId = context.enterpriseId ?? null;
 
-  await client.chat.postMessage({
-    channel: userId,
-    text: message.text,
-    blocks: message.blocks,
-  });
-});
+  const threadTs = incomingThreadTs || ts;
+  const botUserId =
+    context.botUserId ?? (await getBotUserId(teamId, enterpriseId));
+  const sanitized = botUserId
+    ? text.replace(new RegExp(`<@${botUserId}>`, 'g'), '').trim()
+    : text;
 
-app.action<BlockAction<ButtonAction>>('task_delete', async ({ ack, body, client }) => {
-  await ack();
-
-  const taskId = (body as BlockAction<ButtonAction>).actions[0].value;
-  const userId = body.user.id;
-
-  if (!taskId) {
-    console.error('No task ID found in task_delete button value');
-    return;
-  }
-
-  try {
-    const task = await prisma.task.findUnique({
-      where: { id: taskId },
-    });
-
-    await prisma.task.delete({
-      where: { id: taskId },
-    });
-
-    await client.chat.postEphemeral({
-      channel: (body as any).channel?.id || userId,
-      user: userId,
-      text: `🗑️ Task deleted successfully: ${task?.title || 'Task'}`,
-    });
-
-    const messageTs = (body as any).message?.ts;
-    const channel = (body as any).channel?.id;
-
-    if (messageTs && channel) {
-      const originalBlocks = (body as any).message?.blocks || [];
-      const headerText =
-        originalBlocks.length > 0 && originalBlocks[0]?.text?.text
-          ? originalBlocks[0].text.text.toLowerCase()
-          : '';
-
-      const showCompleted = headerText.includes('completed tasks');
-      const showAll = headerText.includes('all tasks');
-
-      const refreshMessage = await buildTaskListMessage(prisma, userId, {
-        showCompleted,
-        showAll,
-      });
-
-      await client.chat.update({
-        channel,
-        ts: messageTs,
-        text: refreshMessage.text,
-        blocks: refreshMessage.blocks,
-      });
-    }
-  } catch (error) {
-    console.error('❌ Error deleting task:', error);
-
-    await client.chat.postEphemeral({
-      channel: (body as any).channel?.id || userId,
-      user: userId,
-      text: '❌ Failed to delete task. Please try again.',
-    });
-  }
-});
-
-receiver.router.post('/slack/events', async (req, res) => {
-  const { type, challenge } = req.body;
-  if (type === 'url_verification') {
-    return res.status(200).send(challenge);
-  }
-  res.status(200).send();
-});
-
-app.event('app_mention', async ({ event, client }) => {
-  const userId = requireString((event as any).user, 'event.user');
-  const channelId = requireString((event as any).channel, 'event.channel');
-  const threadTs = ((event as any).thread_ts || event.ts) as string;
-  const originalText = event.text || '';
-  const conversationKey = getConversationKey(channelId, (event as any).thread_ts, event.ts);
-
-  const botId = process.env.SLACK_BOT_USER_ID;
-  const sanitizedText = botId
-    ? originalText.replace(new RegExp(`<@${botId}>`, 'g'), '').trim()
-    : originalText;
-
-  const send = async (message: string | { text?: string; blocks?: any[] }) => {
-    if (typeof message === 'string') {
-      await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: message,
-      });
-      return;
-    }
-
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: message.text ?? 'Notification',
-      blocks: message.blocks,
-    });
-  };
-
-  const userMessagePayload = buildUserMessagePayload({
+  await handleConversationTurn({
+    client,
+    registry: functionRegistry,
     userId,
     channelId,
-    text: sanitizedText || originalText,
+    teamId,
+    enterpriseId,
+    threadTs,
+    fallbackTs: ts,
+    text: sanitized || text,
   });
-  conversationStore.append(conversationKey, { role: 'user', content: userMessagePayload });
-
-  const orchestratorResult = await runAiOrchestrator({
-    registry: functionRegistry,
-    messages: conversationStore.get(conversationKey),
-    context: {
-      slack: {
-        client,
-        channelId,
-        userId,
-        rawText: sanitizedText || originalText,
-        threadTs,
-        send,
-      },
-      prisma,
-    },
-  });
-
-  if (orchestratorResult.finalReply) {
-    await send(orchestratorResult.finalReply);
-  }
-
-  if (orchestratorResult.finalReply) {
-    conversationStore.append(conversationKey, {
-      role: 'assistant',
-      content: orchestratorResult.finalReply,
-    });
-  }
-
-  for (const tool of orchestratorResult.toolResults) {
-    console.log(`🔧 Tool ${tool.name} -> ${tool.status}${tool.message ? ` (${tool.message})` : ''}`);
-  }
 });
 
-app.message(async ({ message, client }) => {
-  if ((message as any).subtype) {
-    return;
-  }
+app.message(async ({ message, client, context }) => {
+  if ((message as any).subtype) return;
+  if ((message as any).bot_id) return;
 
   const userId = (message as any).user as string | undefined;
   const channelId = (message as any).channel as string | undefined;
   const text = (message as any).text as string | undefined;
   const ts = (message as any).ts as string | undefined;
+  const threadTs = (message as any).thread_ts as string | undefined;
 
-  if (!userId || !text || !channelId) {
-    return;
+  if (!userId || !channelId || !text) return;
+
+  if (channelId.startsWith('D') && isAwaitingReasonFromUser(userId)) {
+    const handled = await consumeReasonReply(userId, channelId, text, client);
+    if (handled) return;
   }
 
-  if (pendingTaskReasons.has(userId)) {
-    const taskId = pendingTaskReasons.get(userId)!;
-    pendingTaskReasons.delete(userId);
+  const isDm = channelId.startsWith('D');
+  if (!isDm) {
 
-    try {
-      await prisma.task.update({
-        where: { id: taskId },
-        data: { notCompletedReason: text },
-      });
-
-      await client.chat.postMessage({
-        channel: channelId,
-        text: '📝 Thank you! Your reason has been recorded.',
-      });
-    } catch (error) {
-      console.error('Failed to save not-completed reason', error);
-      await client.chat.postMessage({
-        channel: channelId,
-        text: '❌ Failed to record your reason. Please try again.',
-      });
-    }
-
-    return;
+    if (!threadTs) return;
+    const key = getConversationKey(channelId, threadTs, ts);
+    if (!conversationStore.has(key)) return;
   }
 
-  const messageThreadTs = (message as any).thread_ts as string | undefined;
-  const conversationKey = getConversationKey(channelId, messageThreadTs, ts);
-
-  const isDirectMessage = channelId.startsWith('D');
-  if (!isDirectMessage) {
-    if (!messageThreadTs) {
-      return;
-    }
-    if (!conversationStore.has(conversationKey)) {
-      return;
-    }
-  }
-
-  const send = async (message: string | { text?: string; blocks?: any[] }) => {
-    if (typeof message === 'string') {
-      await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: ts,
-        text: message,
-      });
-      return;
-    }
-
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: ts,
-      text: message.text ?? 'Notification',
-      blocks: message.blocks,
-    });
-  };
-
-  const userMessagePayload = buildUserMessagePayload({
+  await handleConversationTurn({
+    client,
+    registry: functionRegistry,
     userId,
     channelId,
+    teamId: context.teamId ?? null,
+    enterpriseId: context.enterpriseId ?? null,
+    threadTs,
+    fallbackTs: ts,
     text,
   });
-  conversationStore.append(conversationKey, { role: 'user', content: userMessagePayload });
+});
 
-  const orchestratorResult = await runAiOrchestrator({
-    registry: functionRegistry,
-    messages: conversationStore.get(conversationKey),
-    context: {
-      slack: {
-        client,
-        channelId,
-        userId,
-        rawText: text,
-        threadTs: ts,
-        send,
-      },
-      prisma,
-    },
-  });
-
-  if (orchestratorResult.finalReply) {
-    await send(orchestratorResult.finalReply);
-  }
-
-  if (orchestratorResult.finalReply) {
-    conversationStore.append(conversationKey, {
-      role: 'assistant',
-      content: orchestratorResult.finalReply,
-    });
-  }
-
-  for (const tool of orchestratorResult.toolResults) {
-    console.log(`🔧 Tool ${tool.name} -> ${tool.status}${tool.message ? ` (${tool.message})` : ''}`);
+app.event('app_home_opened', async ({ event, client }) => {
+  const userId = (event as any).user as string;
+  try {
+    const view = await buildHomeView(prisma, userId);
+    await client.views.publish({ user_id: userId, view });
+  } catch (err) {
+    log.error('Failed to publish home view', { userId, error: String(err) });
   }
 });
 
-registerTaskActions(app);
+app.event('app_uninstalled', async ({ context }) => {
+  const teamId = context.teamId ?? null;
+  const enterpriseId = context.enterpriseId ?? null;
+  try {
+    if (prismaInstallationStore.deleteInstallation) {
+      await prismaInstallationStore.deleteInstallation({
+        teamId: teamId ?? undefined,
+        enterpriseId: enterpriseId ?? undefined,
+        isEnterpriseInstall: Boolean(context.isEnterpriseInstall),
+      } as any);
+    }
+    const { evictTeamFromCache } = await import('./lib/slackClient');
+    evictTeamFromCache(teamId, enterpriseId);
+    log.info('App uninstalled, installation removed', { teamId, enterpriseId });
+  } catch (err) {
+    log.error('Failed to handle app_uninstalled', { error: String(err) });
+  }
+});
 
 (async () => {
-  await app.start(Number(process.env.PORT) || 3000);
-  console.log('⚡ Slack app is running!');
-
-  try {
-    const auth = await app.client.auth.test();
-    if (auth && (auth as any).user_id) {
-      process.env.SLACK_BOT_USER_ID = (auth as any).user_id;
-      console.log('🤖 Resolved SLACK_BOT_USER_ID:', process.env.SLACK_BOT_USER_ID);
-    }
-  } catch (e) {
-    console.warn('⚠️ Failed to resolve bot user id via auth.test()', e);
-  }
+  await app.start(PORT);
+  log.info('Slack AI COO is running (multi-tenant OAuth)', {
+    port: PORT,
+    installPath: '/slack/install',
+    redirectPath: '/slack/oauth_redirect',
+    baseUrl: BASE_URL || '(set BASE_URL for the landing page link)',
+  });
 
   startTaskReminderScheduler();
+  startProgressCheckScheduler(functionRegistry);
 })();
 
-function requireString(v: string | undefined, name: string): string {
-  if (!v || typeof v !== 'string') {
-    throw new Error(`${name} is required but was missing/undefined.`);
-  }
-  return v;
-}
+const shutdown = async (signal: string) => {
+  log.info(`Shutting down (${signal})`);
+  try {
+    await prisma.$disconnect();
+  } catch {
 
-function buildUserMessagePayload(payload: {
-  userId: string;
-  channelId: string;
-  text: string;
-}): string {
-  return [
-    'Incoming Slack message:',
-    JSON.stringify(
-      {
-        userId: payload.userId,
-        channelId: payload.channelId,
-        text: payload.text,
-      },
-      null,
-      2
-    ),
-  ].join('\n');
-}
-function getConversationKey(channelId: string, threadTs?: string, ts?: string): string {
-  if (threadTs) {
-    return `${channelId}:${threadTs}`;
   }
-  if (channelId.startsWith('D')) {
-    return `DM:${channelId}`;
-  }
-  return `${channelId}:${ts ?? 'root'}`;
-}
-
+  process.exit(0);
+};
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

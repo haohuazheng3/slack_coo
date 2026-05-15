@@ -3,6 +3,13 @@ export type ParsedFunctionCall = {
   rawArguments?: string;
 };
 
+/**
+ * Extract `[ToolName] {...json}` tokens from the AI response.
+ *
+ * - The cleanedText is the AI's natural-language portion (tokens removed).
+ * - Square brackets that don't immediately precede a JSON block are kept inline (so the AI can mention "[note]" etc.).
+ * - JSON blocks are matched by balanced braces; nothing fancy beyond that.
+ */
 export function extractFunctionCalls(responseText: string): {
   cleanedText: string;
   calls: ParsedFunctionCall[];
@@ -25,7 +32,8 @@ export function extractFunctionCalls(responseText: string): {
     }
 
     const name = responseText.slice(start + 1, end).trim();
-    if (!/^[A-Za-z0-9_]+$/.test(name)) {
+
+    if (!/^[A-Z][A-Za-z0-9_]*$/.test(name)) {
       cleaned += responseText.slice(cursor, end + 1);
       cursor = end + 1;
       continue;
@@ -39,15 +47,28 @@ export function extractFunctionCalls(responseText: string): {
     }
 
     let rawArguments: string | undefined;
-
     if (responseText[argumentStart] === '{') {
       let depth = 0;
       let i = argumentStart;
+      let inString = false;
+      let escape = false;
       for (; i < responseText.length; i++) {
         const char = responseText[i];
-        if (char === '{') {
-          depth++;
-        } else if (char === '}') {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === '\\') {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+        if (char === '{') depth++;
+        else if (char === '}') {
           depth--;
           if (depth === 0) {
             rawArguments = responseText.slice(argumentStart, i + 1);
@@ -56,9 +77,7 @@ export function extractFunctionCalls(responseText: string): {
           }
         }
       }
-
       if (depth !== 0) {
-        // malformed JSON, treat it as plain text
         rawArguments = undefined;
         cursor = argumentStart;
       }
@@ -72,4 +91,3 @@ export function extractFunctionCalls(responseText: string): {
   const cleanedText = cleaned.trim();
   return { cleanedText, calls };
 }
-

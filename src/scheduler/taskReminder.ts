@@ -1,30 +1,31 @@
 import cron from 'node-cron';
-import { PrismaClient } from '@prisma/client';
-import dotenv from 'dotenv';
-import { WebClient } from '@slack/web-api';
 import { computeReminderLeadMs } from './reminderPolicy';
 import { toSlackMention } from '../utils/assignee';
+import { prisma } from '../lib/prisma';
+import { getClientForTeam } from '../lib/slackClient';
+import { openDm } from '../lib/sendHelpers';
+import { createLogger } from '../lib/logger';
 
-dotenv.config();
-const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
-const prisma = new PrismaClient();
+const log = createLogger('TaskReminder');
 
+const REMINDER_CRON = process.env.REMINDER_CRON || '* * * * *';
+const LOOKAHEAD_DAYS = Number(process.env.REMINDER_LOOKAHEAD_DAYS ?? '7');
+const REMINDER_WINDOW_MS = Number(process.env.REMINDER_WINDOW_MS ?? `${90 * 1000}`);
+const REMINDER_CATCHUP_MS = Number(process.env.REMINDER_CATCHUP_MS ?? `${5 * 60 * 1000}`);
 
 export function startTaskReminderScheduler() {
-  cron.schedule('* * * * *', async () => {
-    console.log("⏰ Checking task reminders...");
-
+  cron.schedule(REMINDER_CRON, async () => {
     const now = new Date();
-    const upper = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // look ahead 7 days
-    const windowMs = 90 * 1000; // broaden to ±1.5 minutes to avoid timing misses
+    const upper = new Date(now.getTime() + LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000);
 
     try {
       const tasks = await prisma.task.findMany({
         where: {
-          completed: false,
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'FAILED', 'PENDING_CLARIFICATION'] },
           deadlineReminderSentAt: null,
-          time: { gte: now, lte: upper }
-        }
+          time: { gte: now, lte: upper },
+        },
+        take: 100,
       });
 
       for (const task of tasks) {
@@ -33,60 +34,62 @@ export function startTaskReminderScheduler() {
 
         const leadMs = computeReminderLeadMs(msUntil);
         const targetTs = task.time.getTime() - leadMs;
-        const deltaMs = now.getTime() - targetTs;
-        const shouldSend =
-          Math.abs(now.getTime() - targetTs) <= windowMs ||
-          (targetTs < now.getTime() && deltaMs <= 5 * 60 * 1000);
+        const inWindow = Math.abs(now.getTime() - targetTs) <= REMINDER_WINDOW_MS;
+        const catchingUp = targetTs < now.getTime() && now.getTime() - targetTs <= REMINDER_CATCHUP_MS;
+        if (!inWindow && !catchingUp) continue;
 
-        console.log(
-          "[ReminderDebug]",
-          JSON.stringify({
-            id: task.id,
-            title: task.title,
-            now: now.toISOString(),
-            deadline: task.time.toISOString(),
-            msUntil,
-            leadMs,
-            target: new Date(targetTs).toISOString(),
-            deltaMs,
-            windowMs,
-            shouldSend
-          })
-        );
+        const client = await getClientForTeam(task.teamId, task.enterpriseId);
+        if (!client) {
+          log.warn('No client for task team', { taskId: task.id, teamId: task.teamId });
+          continue;
+        }
 
-        // Fire within window or catch-up up to 5 minutes late if missed while app was down
-        if (shouldSend) {
-          try {
-            // Open IM channel to DM the assignee properly (fallback to createdBy if assignee is the bot)
-            const botId = process.env.SLACK_BOT_USER_ID;
-            const dmUser = botId && task.assignee === botId ? task.createdBy : task.assignee;
-            const conv = await slack.conversations.open({ users: dmUser });
-            const dmChannel = (conv as any).channel?.id || dmUser;
+        const dmChannel = await openDm(client, task.assignee);
+        if (!dmChannel) {
+          log.warn('Could not open DM for reminder', { taskId: task.id, assignee: task.assignee });
+          continue;
+        }
 
-            console.log("[ReminderSend]", { user: dmUser, dmChannel });
+        const assigneeMentions =
+          Array.isArray(task.assignees) && task.assignees.length > 0
+            ? task.assignees.map((a) => toSlackMention(a)).join(', ')
+            : toSlackMention(task.assignee);
 
-            const assigneeMentions =
-              Array.isArray(task.assignees) && task.assignees.length > 0
-                ? task.assignees.map((a) => toSlackMention(a)).join(', ')
-                : toSlackMention(task.assignee);
+        try {
+          await client.chat.postMessage({
+            channel: dmChannel,
+            text: `🔔 Reminder: ${task.title}`,
+            blocks: [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: [
+                    `🔔 *Reminder: ${task.title}*`,
+                    task.description ? `📝 ${task.description}` : '',
+                    `📅 Due: ${task.time.toLocaleString()}`,
+                    `👤 ${assigneeMentions}`,
+                  ]
+                    .filter(Boolean)
+                    .join('\n'),
+                },
+              },
+            ],
+          });
 
-            await slack.chat.postMessage({
-              channel: dmChannel,
-              text: `🔔 Reminder: ${task.title}\n• Due: ${task.time.toLocaleString()}\n• Assignees: ${assigneeMentions}`,
-            });
-
-            await prisma.task.update({
-              where: { id: task.id },
-              data: { deadlineReminderSentAt: new Date() },
-            });
-            console.log("[ReminderMark]", { id: task.id, setAt: new Date().toISOString() });
-          } catch (err) {
-            console.error("❌ Failed to send DM reminder:", err);
-          }
+          await prisma.task.update({
+            where: { id: task.id },
+            data: { deadlineReminderSentAt: new Date() },
+          });
+          log.info('Reminder sent', { taskId: task.id });
+        } catch (err) {
+          log.error('Failed to send reminder', { taskId: task.id, error: String(err) });
         }
       }
     } catch (e) {
-      console.error("❌ Failed to query tasks:", e);
+      log.error('Reminder cron failed', { error: String(e) });
     }
   });
+
+  log.info('Task reminder scheduler started', { cron: REMINDER_CRON });
 }

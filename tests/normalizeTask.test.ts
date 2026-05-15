@@ -12,7 +12,7 @@ const baseInput = {
 
 describe('normalizeToDBTask', () => {
   it('uses ISO time when provided', () => {
-    const target = new Date(Date.now() + 60 * 60 * 1000); // +1h
+    const target = new Date(Date.now() + 60 * 60 * 1000);
     const out = normalizeToDBTask({
       ...baseInput,
       title: 'ISO test',
@@ -22,7 +22,7 @@ describe('normalizeToDBTask', () => {
     });
     expect(out.title).toBe('ISO test');
     expect(out.assignee).toBe('UAAA111');
-    approxEqualTime(out.time, target, 50); // within 50ms of parsed ISO
+    approxEqualTime(out.time, target, 50);
   });
 
   it('falls back to reminder_time "in 15 minutes" when ISO is missing', () => {
@@ -34,7 +34,6 @@ describe('normalizeToDBTask', () => {
       assignee: '<@UBBB222>',
     });
     const after = new Date();
-    // expect around 15 minutes from "before" timestamp
     const expectedLower = new Date(before.getTime() + 15 * 60 * 1000 - 2000);
     const expectedUpper = new Date(after.getTime() + 15 * 60 * 1000 + 2000);
     expect(out.time.getTime()).toBeGreaterThanOrEqual(expectedLower.getTime());
@@ -59,7 +58,7 @@ describe('normalizeToDBTask', () => {
     expect(out.assignee).toBe('UCCC333');
   });
 
-  it('extracts multiple assignees from assignees array without duplicating primary', () => {
+  it('extracts multiple assignees from assignees array and ensures primary is included once', () => {
     const out = normalizeToDBTask({
       ...baseInput,
       title: 'assignees array',
@@ -68,7 +67,9 @@ describe('normalizeToDBTask', () => {
       reminder_time: 'in 10 minutes',
     });
     expect(out.assignee).toBe('UPRIMARY');
-    expect(out.assignees.sort()).toEqual(['UBAR', 'UFOO'].sort());
+    expect(out.assignees.sort()).toEqual(['UBAR', 'UFOO', 'UPRIMARY'].sort());
+
+    expect(new Set(out.assignees).size).toBe(out.assignees.length);
   });
 
   it('defaults to now when times are invalid/missing', () => {
@@ -80,7 +81,6 @@ describe('normalizeToDBTask', () => {
       assignee: '<@UDEF>',
     });
     const after = new Date();
-    // Should be "now" per implementation, allow small drift tolerance (~2s)
     expect(out.time.getTime()).toBeGreaterThanOrEqual(before.getTime() - 2000);
     expect(out.time.getTime()).toBeLessThanOrEqual(after.getTime() + 2000);
     expect(out.assignee).toBe('UDEF');

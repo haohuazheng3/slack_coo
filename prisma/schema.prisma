@@ -7,18 +7,133 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// Lifecycle of a task. PENDING_CLARIFICATION = AI is still gathering info from the owner.
+enum TaskStatus {
+  PENDING_CLARIFICATION
+  NOT_STARTED
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
 model Task {
-  id                     String    @id @default(cuid())
+  id                     String       @id @default(cuid())
   title                  String
+  description            String?
   time                   DateTime
   assignee               String
+  assignees              String[]
+
+  /// The Slack workspace (team) this task belongs to. Required for multi-tenant routing.
+  teamId                 String?
+  enterpriseId           String?
+
   channelId              String
+  channelMessageTs       String?
+  threadTs               String?
   createdBy              String
-  createdAt              DateTime  @default(now())
-  completed              Boolean   @default(false)
+  initiator              String?
+  status                 TaskStatus   @default(NOT_STARTED)
+  priority               TaskPriority @default(NORMAL)
+
+  progressPercent        Int          @default(0)
+  lastProgressSummary    String?
+  lastProgressAt         DateTime?
+  lastNudgeAt            DateTime?
+
+  // Legacy / runtime flags
+  completed              Boolean      @default(false)
+  completedAt            DateTime?
   notCompletedReason     String?
   notCompletedReasonAt   DateTime?
-  assignees              String[]
-  completedAt            DateTime?
   deadlineReminderSentAt DateTime?
+  progressPingSentAt     DateTime?
+  progressAutoFailedAt   DateTime?
+
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  progressUpdates        ProgressUpdate[]
+
+  @@index([assignee])
+  @@index([initiator])
+  @@index([status])
+  @@index([time])
+  @@index([teamId])
+}
+
+/// One row per progress signal: employee replies, AI summaries, auto-marks, etc.
+model ProgressUpdate {
+  id              String      @id @default(cuid())
+  taskId          String
+  task            Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  /// "employee_reply" | "ai_summary" | "auto_timeout" | "manual_owner" | "system"
+  source          String
+
+  /// Slack user id who triggered this update (employee or owner). Null for system events.
+  authorId        String?
+
+  /// Original raw text (what the employee said).
+  rawText         String?
+
+  /// AI-generated owner-facing summary (succinct, language-aware).
+  summary         String?
+
+  /// Snapshot of the progress percent at the moment of this update.
+  progressPercent Int?
+
+  /// Snapshot of the task status at the moment of this update.
+  statusAtTime    TaskStatus?
+
+  createdAt       DateTime    @default(now())
+
+  @@index([taskId, createdAt])
+}
+
+/// One row per Slack workspace install. Holds the bot token Bolt needs to act on behalf of that workspace.
+/// Either teamId or enterpriseId is non-null (or both for Enterprise Grid orgs).
+model SlackInstallation {
+  id              String   @id @default(cuid())
+
+  /// "T0123..." workspace ID. Null for org-level installs in Enterprise Grid.
+  teamId          String?
+
+  /// "E0123..." enterprise / org grid ID. Null for standard installs.
+  enterpriseId    String?
+
+  /// Slack-issued primary identifier for this install row (see InstallationStore query semantics).
+  installerUserId String?
+
+  /// Bot side
+  botId           String?
+  botUserId       String?
+  botToken        String
+  botRefreshToken String?
+  botTokenExpiresAt DateTime?
+
+  /// "app_mentions:read,chat:write,..." for diagnostics
+  scopes          String?
+
+  /// True if this is the "org-level" install row for Enterprise Grid
+  isEnterpriseInstall Boolean @default(false)
+
+  /// Full raw Installation JSON as returned by the Slack OAuth response (good for debugging/restore)
+  raw             Json
+
+  installedAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([teamId, enterpriseId])
+  @@index([teamId])
+  @@index([enterpriseId])
 }

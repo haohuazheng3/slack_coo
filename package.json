@@ -1,14 +1,31 @@
 {
   "name": "slack-coo",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.1.0",
+  "description": "AI Chief Operating Officer for Slack — turns owner intent into clarified, assigned, tracked, and reported work.",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
+    "dev": "nodemon",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "prisma generate",
+    "prisma:generate": "prisma generate",
+    "prisma:push": "prisma db push",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "keywords": [],
+  "keywords": [
+    "slack",
+    "ai",
+    "operations",
+    "coo",
+    "openai",
+    "prisma"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
@@ -23,6 +40,7 @@
   "dependencies": {
     "@prisma/client": "^6.18.0",
     "@slack/bolt": "^4.4.0",
+    "@slack/web-api": "^7.9.3",
     "@supabase/supabase-js": "^2.52.1",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",

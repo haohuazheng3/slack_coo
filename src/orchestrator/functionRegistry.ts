@@ -7,6 +7,9 @@ export type SlackExecutionContext = {
   userId: string;
   rawText: string;
   threadTs?: string;
+
+  teamId?: string | null;
+  enterpriseId?: string | null;
   send: (message: string | { text: string; blocks?: any[] }) => Promise<void>;
 };
 

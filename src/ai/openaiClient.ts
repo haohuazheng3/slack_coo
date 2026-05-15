@@ -1,8 +1,6 @@
 import { OpenAI } from 'openai';
-import dotenv from 'dotenv';
 
-dotenv.config();
-
+// dotenv is loaded once in src/index.ts (the entrypoint).
 export const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });

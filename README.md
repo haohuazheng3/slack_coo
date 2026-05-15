@@ -1,108 +1,157 @@
-# Slack AI COO — AI-Orchestrated Operations Copilot
+# Slack AI COO — The Bridge Between Owner & Team
 
-This project turns a Slack mention into a fully AI-driven operations workflow. Instead of hard-coded pipelines, the AI chooses which automation tools to run, when to run them, and how to respond back to the human. Prompts train the assistant like an operator; functions give it the equipment it can use on demand.
+> "Every sentence the founder says, becomes a tracked, accountable piece of work."
+
+The AI COO is a Slack app that sits between business owners and their team. When a leader mentions the bot in a channel and assigns work, the AI **clarifies missing details, creates a structured task card, DMs the assignee, follows up on a cadence, summarizes employee replies into owner-readable status updates, and surfaces everything in real time on the owner's App Home dashboard.**
+
+The owner no longer has to chase. The COO does.
 
 ---
 
 ## Table of Contents
 
-1. [Key Capabilities](#key-capabilities)
-2. [Architecture Overview](#architecture-overview)
-3. [AI Orchestration Flow](#ai-orchestration-flow)
-4. [Tool Catalog](#tool-catalog)
+1. [What's New in v2](#whats-new-in-v2)
+2. [How It Works](#how-it-works)
+3. [The Tool Catalog](#the-tool-catalog)
+4. [Cadence — When the COO Pings Employees](#cadence--when-the-coo-pings-employees)
 5. [Project Structure](#project-structure)
-6. [Prerequisites](#prerequisites)
+6. [Setup](#setup)
 7. [Environment Variables](#environment-variables)
 8. [Slack App Setup](#slack-app-setup)
 9. [Local Development](#local-development)
-10. [Monitoring Tool Invocations](#monitoring-tool-invocations)
-11. [Adding New Tools](#adding-new-tools)
-12. [Testing](#testing)
-13. [Deployment Notes](#deployment-notes)
-14. [Roadmap Ideas](#roadmap-ideas)
+10. [Adding a New Tool](#adding-a-new-tool)
+11. [Testing](#testing)
+12. [Deployment](#deployment)
+13. [Roadmap](#roadmap)
 
 ---
 
-## Key Capabilities
+## What's New in v2
 
-- **AI-first command center**: every `@bot` mention or direct message is routed to OpenAI with a structured system prompt that describes the available tools.
-- **Bracket-triggered tools**: the assistant can call any registered function by emitting tokens like `[CreateTask]{...}`. No brackets means no automation runs.
-- **Unified execution context**: each tool receives Slack + database context, so it can post updates, modify records, and return status in one place.
-- **Live observability**: every tool call is logged to the console and echoed in Slack so humans see exactly what the AI is doing.
-- **Resilient fallbacks**: if the AI produces invalid JSON payloads or calls an unknown tool, the orchestrator captures the error and keeps the conversation going.
-- **Legacy actions retained**: existing button handlers (complete, delay, delete) still work for manual overrides.
+| Capability | v1 | v2 |
+| --- | --- | --- |
+| **Distribution** | Single workspace (hard-coded `SLACK_BOT_TOKEN`) | **Multi-tenant OAuth — anyone can install to their own workspace via `/slack/install`** |
+| Ambiguous tasks | Created immediately (often wrong) | **AI asks a clarifying question first via `[AskClarification]`** |
+| Progress tracking | Time-elapsed % only | **Real status enum + AI-estimated 0–100% + summary text** |
+| Employee replies | Stored as raw `notCompletedReason` | **AI summarizes into one CEO-readable sentence, status auto-classified** |
+| Owner notification | None | **DM + Home Tab + channel card all sync in real time** |
+| Pinging cadence | Only when due | **Priority-aware: URGENT pings hourly + 2x daily; LOW once per 8h** |
+| Cancel vs delete | Tangled | **`[UpdateTaskStatus] CANCELLED` is the default soft delete; `[DeleteTask]` requires the word "delete"** |
+| Languages | English only | **English + 中文 (set via `OWNER_LANGUAGE`); AI auto-mirrors user's language** |
+| Codebase | 1 `index.ts` with copy-paste handlers | **Modular: `lib/`, `orchestrator/`, `functions/`, `slack/`, `ui/`, `scheduler/`, `installation/`** |
+| Observability | console.log | Structured logger with levels |
+| Schema | 1 table, mixed flags | **`Task` + `ProgressUpdate` + `SlackInstallation` (multi-tenant token storage)** |
+| Database | Hard-coded Supabase | **Works with any Postgres; Neon recommended (serverless, free tier)** |
+| Tests | 2 files | **5 files / 37 tests** |
 
 ---
 
-## Architecture Overview
+## How It Works
 
 ```
-Slack @mention or DM
-          │
-          ▼
-Bolt receiver (app.event / app.message)
-          │
-          ▼
-runAiOrchestrator()
-  ├─ build system prompt (ai/prompt.ts)
-  ├─ call OpenAI (ai/openaiClient.ts)
-  ├─ parse bracket tokens (orchestrator/parseAiResponse.ts)
-  ├─ log + notify tool usage
-  └─ execute registered handlers (functions/*)
-          │
-          ▼
-Prisma (tasks table), Slack messages, schedulers, etc.
+        ┌──────────────────────────────────────────────────────┐
+        │  CHANNEL: owner @AI COO "ask Luna to ship landing    │
+        │           page by Friday EOD, high priority"         │
+        └──────────────────────────────────────────────────────┘
+                         │
+                         ▼
+            Orchestrator + system prompt
+                         │
+       ┌─────────────────┴────────────────┐
+       │  Did the owner give title +      │
+       │  assignee + due time?            │
+       └─────────────────┬────────────────┘
+              YES        │        NO
+                ▼                  ▼
+      [CreateTask]          [AskClarification]
+        │                          │
+        │                  (owner replies → orchestrator loops back)
+        │
+        ├── Posts a task card in the channel (with Mark Complete / Modify)
+        ├── DMs the assignee with the brief
+        ├── DMs the owner with confirmation
+        └── Refreshes owner's App Home tab
+
+         ┌────────────────────────────────────────┐
+         │  Scheduler runs every 10 minutes       │
+         │  → for each non-completed task:        │
+         │     - daily 10am check-in?             │
+         │     - mid-window check for 4–24h tasks?│
+         │     - 30 min before due?               │
+         │     - overdue?                         │
+         │     → [NudgeProgress] DMs the assignee │
+         └────────────────────────────────────────┘
+                         │
+                         ▼
+   ┌────────────────────────────────────────────────┐
+   │ DM: assignee replies "got the layout done,     │
+   │     waiting on copy from marketing"            │
+   └────────────────────────────────────────────────┘
+                         │
+                         ▼
+            Orchestrator → [RecordProgress]
+                         │
+   ┌─────────────────────┴──────────────────────────┐
+   │ AI summarizer interprets reply:                │
+   │   status   = BLOCKED                           │
+   │   percent  = 65                                │
+   │   summary  = "Layout done; waiting on          │
+   │               copy from marketing."            │
+   │   blocker  = "Copy from marketing"             │
+   └─────────────────────┬──────────────────────────┘
+                         │
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+  DM the owner    Update Home Tab    Update channel card
+                  with progress bar  in place
 ```
 
-Schedulers, reminder cards, and button actions continue to run exactly as before; the difference is that their functions are now callable by the AI itself.
+---
+
+## Languages
+
+The Home Tab, channel cards, list views, and the AI's spoken language all adapt:
+
+- The **AI orchestrator** mirrors the user's language automatically (English / 中文). If the owner writes in 中文, the bot replies in 中文 and creates cards/dashboards with 中文 labels.
+- The **default language** for the Home Tab and rendered cards is set by `OWNER_LANGUAGE` (`en` or `zh`). This is what an employee sees on a button they click, and what the owner sees on their App Home if they haven't yet typed anything in this thread.
+- Adding a new language is a 1-file change: extend `COMMON`, `STATUS_LABEL`, and `PRIORITY_BADGE` in [`src/lib/i18n.ts`](src/lib/i18n.ts) and add a new code (e.g. `'ja'`) to `SupportedLanguage`.
+
+## The Tool Catalog
+
+The AI orchestrator is allowed to invoke these tools by emitting `[ToolName] {…json…}` tokens.
+
+| Tool | When | Effect |
+| ---- | ---- | ------ |
+| `AskClarification` | Owner mentioned the bot but title / assignee / dueTime is missing | Posts a targeted question in the same channel; no DB write |
+| `CreateTask` | All required fields are present | Persists the task, posts the card, DMs both parties, refreshes Home tab |
+| `UpdateTaskDetails` | Owner wants to change title / assignee / due / priority of an existing task | Updates DB + re-renders the channel card + Home tab |
+| `UpdateTaskStatus` | Owner directly sets status (`COMPLETED`, `CANCELLED`, etc.) | Updates DB + re-renders |
+| `RecordProgress` | Employee sent a free-form status reply in DM | AI summarizes → updates DB → DMs owner → refreshes Home & card |
+| `NudgeProgress` | Scheduler decides it's time, or owner asks "ping X for an update" | DMs the assignee asking for status |
+| `ListTasks` | Owner says "show my tasks" / "list" / "what's open" | Posts a card list (with Modify / Delete / Complete buttons) |
+| `DeleteTask` | Owner explicitly says "delete X" | Hard-deletes the row (prefer `UpdateTaskStatus: CANCELLED` for soft delete) |
 
 ---
 
-## AI Orchestration Flow
+## Cadence — When the COO Pings Employees
 
-1. **Event capture**  
-   `app_mention` and Slack direct messages are intercepted in `src/index.ts`. Plain mentions are sanitized to remove the bot mention. Replies share a thread.
+`shouldNudgeTask()` in [`src/scheduler/cadencePolicy.ts`](src/scheduler/cadencePolicy.ts) is the policy. It's **priority-aware** — the COO behaves like a thoughtful chief of staff, not a robot:
 
-2. **Context build**  
-   We assemble a `FunctionExecutionContext` containing:
-   - Slack client + `send()` helper constrained to the same channel/thread
-   - Prisma client for database operations
-   - Raw user message text and metadata
+| Priority | Cooldown | Pre-due window | Daily check-in | Mid-window trigger (4–24h tasks) |
+| -------- | -------- | -------------- | -------------- | -------------------------------- |
+| URGENT 🔴 | 1h | 60 min | 10am + 3pm | At 33% of window if no update in 2h |
+| HIGH 🟠 | 2h | 45 min | 10am | At 50% of window if no update in 4h |
+| NORMAL 🟡 | 4h | 30 min | 10am | At 50% of window if no update in 6h |
+| LOW 🟢 | 8h | 30 min | 10am | At 60% of window if no update in 12h |
 
-3. **Prompt injection**  
-   `buildSystemPrompt()` lists every registered tool with purpose and JSON example. It also enforces communication style and tool-calling etiquette (human response first, one tool per line, double-quoted JSON).
+Plus, regardless of priority:
+- Multi-day tasks (>24h until due) get the daily check-in slot(s) above.
+- Short tasks (<4h until due) only get the pre-due window ping.
+- Overdue tasks get an `overdue` nudge (subject to the priority cooldown).
 
-4. **Model call**  
-   We run `openai.chat.completions.create()` with the system prompt + user message (model: `gpt-4o-mini`, temperature 0.2).
+A separate scheduler auto-marks the task **BLOCKED** if the assignee doesn't reply within 1 hour of a nudge, and DMs the owner.
 
-5. **Tool extraction**  
-   `extractFunctionCalls()` scans the response for `[ToolName]` tokens followed by JSON blocks. The natural-language portion is kept as `finalReply`.
-
-6. **Execution + logging**  
-   For each tool:
-   - Log to console with payload preview.
-   - Notify Slack: `🤖 AI triggered tool [ToolName]`.
-   - Parse JSON payload (if present).
-   - Execute the handler from the `FunctionRegistry`.
-   - Record success/error metadata for debugging.
-
-7. **Human response**  
-   The cleaned natural-language reply is always sent to Slack, even if no tool ran.
-
----
-
-## Tool Catalog
-
-All tools live in `src/functions/` and are registered via `registerCoreFunctions()`:
-
-| Tool | Description | Example Payload |
-| ---- | ----------- | ---------------- |
-| `CreateTask` | Normalize and persist a task based on AI-provided details. Posts a confirmation card. | `{"title": "Prepare Q4 forecast", "dueTime": "2025-01-05T14:00:00-05:00", "assignee": "<@U123>"}` |
-| `ListTasks` | Show pending/completed/all tasks for the requester using Block Kit. | `{"scope": "completed"}` |
-| `DeleteTask` | Permanently remove a task by `taskId`. Notifies channel. | `{"taskId": "clxyz123"}` |
-| `UpdateTaskStatus` | Mark a task complete or pending with optional note. | `{"taskId": "clxyz123", "completed": false, "note": "Need more data."}` |
-
-Each handler receives (`args`, `context`) and returns `{ status, message, data? }`. Handlers are responsible for validating inputs and providing user-facing feedback.
+All hours / cooldowns are environment-driven; see [Environment Variables](#environment-variables).
 
 ---
 
@@ -110,187 +159,353 @@ Each handler receives (`args`, `context`) and returns `{ status, message, data? 
 
 ```
 src/
-  actions/              # Slack interactive button handlers (complete, delay, etc.)
   ai/
-    openaiClient.ts     # OpenAI SDK client with env-driven API key
-    prompt.ts           # System prompt builder for the AI COO
+    openaiClient.ts          OpenAI SDK singleton
+    prompt.ts                System prompt (decision tree, forbidden behaviors, etc.)
+  lib/
+    prisma.ts                PrismaClient singleton (cached in global)
+    slackClient.ts           WebClient singleton + bot user id helper
+    logger.ts                Structured leveled logger
+    sendHelpers.ts           buildChannelSender, getConversationKey, buildUserMessagePayload, openDm
   orchestrator/
-    functionRegistry.ts # Tool registration + execution context definitions
-    parseAiResponse.ts  # Extracts [Tool] tokens + JSON payloads
-    runAiOrchestrator.ts# Core AI decision loop
+    functionRegistry.ts      Tool registry + execution context types
+    parseAiResponse.ts       Extracts [ToolName] {...json} tokens
+    runAiOrchestrator.ts     One-shot AI turn → executes parsed tools
+    handleConversationTurn.ts Shared Slack-event → AI-turn pipeline (used by mention/DM/buttons)
+    conversationStore.ts     In-memory per-thread message history (TTL-aware)
   functions/
-    createTask.ts       # Tool implementations (AI-callable)
-    deleteTask.ts
-    listTasks.ts
-    updateTaskStatus.ts
-    index.ts            # Registers the catalog with the FunctionRegistry
-  slack/
-    listTasks.ts        # Shared Block Kit builders for task listings
+    askClarification.ts      "I need more info" tool
+    createTask.ts            Persist task + post card + DM both parties + refresh home
+    updateTaskDetails.ts     Mutate title/assignee/due/priority + sync UI
+    updateTaskStatus.ts      Set status enum + sync UI
+    recordProgress.ts        AI summarizer + status inference + owner notification
+    nudgeProgress.ts         Outbound DM asking for status
+    listTasks.ts             Render task list
+    deleteTask.ts            Hard delete
+    index.ts                 Registry wire-up
   scheduler/
-    taskReminder.ts     # Cron-driven reminder sender (unchanged)
+    taskReminder.ts          Deadline reminders (per reminderPolicy)
+    reminderPolicy.ts        How early to remind based on length until due
+    progressCheck.ts         Cadence-driven nudge + 1-hour timeout auto-mark
+    cadencePolicy.ts         The "when to nudge" decision function
   services/
-    normalizeTask.ts    # Task normalization logic reused by CreateTask
-  db/
-    writeTask.ts        # Prisma task persistence helper
+    normalizeTask.ts         Title/assignee/time normalization
+    aiSummarizer.ts          OpenAI-backed interpretation of employee replies
+  slack/
+    actions.ts               Block Kit button handlers (mark_complete, edit_start, etc.)
+    homeView.ts              Builds the owner's App Home view
+    listTasks.ts             Builds the task list message
+    taskCardUpdater.ts       Re-renders channel cards & home tab in place
+  ui/
+    progressBar.ts           Unicode progress bar renderer
+    taskCard.ts              Reusable task Block Kit card (channel / list / home variants)
   utils/
-    assignee.ts         # Slack mention utilities
-  index.ts              # Slack Bolt entrypoint, orchestrator wiring, message routing
+    assignee.ts              toSlackMention / extractUserId
+  index.ts                   Bolt app entry: receivers, events, schedulers, graceful shutdown
+
 prisma/
-  schema.prisma         # Task model
-.env.example            # Sample environment configuration
+  schema.prisma              Task + ProgressUpdate + enums
+
+tests/
+  parseAiResponse.test.ts    Bracket-token parser
+  cadencePolicy.test.ts      When the scheduler should nudge
+  conversationStore.test.ts  Append / cap / evict
+  reminderPolicy.test.ts     Lead-time bucketing
+  normalizeTask.test.ts      Time + assignee normalization
 ```
 
 ---
 
-## Prerequisites
+## Setup
 
+### Prerequisites
 - Node.js 18+
 - npm
-- A Slack workspace where you can create/install custom apps
-- PostgreSQL database (Supabase recommended)
-- OpenAI API key
-- ngrok (for local testing)
+- A PostgreSQL database — **[Neon](https://neon.tech) recommended** (serverless, free tier, no maintenance)
+- A Slack workspace where you can create a custom app
+- An OpenAI API key
+- ngrok (for local dev)
+
+### Install
+
+```bash
+npm install
+cp .env.example .env
+# fill in SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, OPENAI_API_KEY, DATABASE_URL
+npx prisma generate
+npx prisma db push
+```
+
+The `prisma db push` step creates the v2 schema (new `TaskStatus`/`TaskPriority` enums, new `ProgressUpdate` table, new columns).
+
+### Setting up Neon as your database
+
+1. Sign in at [neon.tech](https://neon.tech) → **Create project**. Pick a region close to where the bot is hosted.
+2. After creation, copy the **direct** connection string from the dashboard. It looks like:
+   ```
+   postgresql://<user>:<password>@ep-cool-bird-12345.us-east-2.aws.neon.tech/neondb?sslmode=require
+   ```
+3. Paste it into your `.env` as `DATABASE_URL=...`.
+4. Run `npx prisma db push` once — this provisions the schema in Neon.
+5. (Optional) In the Neon dashboard, enable **autoscaling** and set **suspend after** = 5 min for the free tier. The bot will reconnect on the next query.
+
+If you want pooled connections (e.g. you scale to multiple replicas later), Neon also exposes a `…-pooler.neon.tech` URL. Add `?sslmode=require&pgbouncer=true&connect_timeout=15` to it. For a single bot instance the direct connection is simpler and faster.
+
+### Migrating from Supabase → Neon (preserving data)
+
+If you already had data in Supabase and want to move it to Neon:
+
+```bash
+# 1. Dump the existing Supabase database (schema + data)
+pg_dump --no-owner --no-acl --clean --if-exists \
+  "postgresql://postgres:<old-supabase-pass>@db.<ref>.supabase.co:5432/postgres" \
+  > supabase-dump.sql
+
+# 2. Restore into the new Neon database
+psql "postgresql://<neon-user>:<neon-pass>@<neon-host>.neon.tech/<db>?sslmode=require" \
+  < supabase-dump.sql
+
+# 3. Update .env DATABASE_URL to the Neon connection string
+# 4. Re-run prisma to make sure the schema matches:
+npx prisma db push
+```
+
+If you do **not** care about preserving old data (recommended for v1 → v2), just point `DATABASE_URL` at a fresh Neon database and run `npx prisma db push`.
+
+### Migration note when upgrading v1 → v2 (in-place)
+v1 tasks did not have `status` / `priority` / `progressPercent` / `description` / `channelMessageTs`. The new schema defaults handle this: all existing rows will be backfilled to `status=NOT_STARTED, priority=NORMAL, progressPercent=0`. If you want already-completed rows to reflect their state, run once after `prisma db push`:
+
+```sql
+UPDATE "Task" SET status = 'COMPLETED', "progressPercent" = 100
+  WHERE completed = TRUE;
+```
 
 ---
 
 ## Environment Variables
 
-Create `.env` (never commit secrets):
+See [`.env.example`](./.env.example) for the full list. The required ones:
 
 ```
 PORT=3000
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_SIGNING_SECRET=...
-OPENAI_API_KEY=...
-DATABASE_URL=postgresql://postgres:<PASSWORD>@db.<ref>.supabase.co:5432/postgres
+OPENAI_API_KEY=sk-...
+DATABASE_URL=postgresql://user:password@host:5432/postgres
 ```
 
-Optional extras (if you reuse them elsewhere):
-`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, etc.
+The interesting tunable ones:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `OPENAI_MODEL` | `gpt-4.1` | Model used for orchestrator decisions |
+| `OPENAI_SUMMARY_MODEL` | `gpt-4.1-mini` | Model used to summarize employee replies |
+| `PROGRESS_NUDGE_HOUR` | `10` | Hour (server local) for the daily check-in |
+| `PROGRESS_NUDGE_CRON` | `*/10 * * * *` | How often the cadence scheduler ticks |
+| `MIN_NUDGE_INTERVAL_MS` | `14400000` (4h) | Cooldown between two nudges for the same task |
+| `CONVERSATION_HISTORY_LIMIT` | `40` | Messages kept per thread for AI context |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ---
 
-## Slack App Setup
+## Slack App Setup (multi-tenant / distribution mode)
 
-1. Visit [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
-2. In **OAuth & Permissions**, add bot scopes: `chat:write`, `app_mentions:read`, `im:history`, `im:read`.
-3. Install the app and copy:
-   - **Bot User OAuth Token** (`SLACK_BOT_TOKEN`)
-   - **Signing Secret** (`SLACK_SIGNING_SECRET`)
-4. Under **Event Subscriptions**:
-   - Enable events.
-   - Request URL → later set to `https://<ngrok-id>.ngrok.io/slack/events`.
-   - Subscribe to bot events: `app_mention`, `message.im`.
-5. Under **Interactivity & Shortcuts**:
-   - Enable interactivity.
-   - Same request URL.
-6. Invite the bot to the channels where you want it to operate.
+> v2 runs in **OAuth distribution** mode. You configure ONE Slack App, and any workspace can install it via `https://<your-domain>/slack/install`. There is no per-workspace bot token to copy.
+
+### 1. Create the app
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
+2. Name it (e.g. "AI COO"), pick any development workspace.
+
+### 2. Bot Token Scopes
+
+**OAuth & Permissions** → **Scopes** → **Bot Token Scopes**. Add:
+
+- `app_mentions:read`
+- `chat:write`
+- `chat:write.public`
+- `im:history`
+- `im:read`
+- `im:write`
+- `users:read`
+
+(No User Token Scopes are needed.)
+
+### 3. OAuth Redirect URL
+
+Still on **OAuth & Permissions** → **Redirect URLs** → **Add New Redirect URL**:
+
+```
+https://<your-domain>/slack/oauth_redirect
+```
+
+For local dev with ngrok, this is `https://<ngrok-id>.ngrok-free.app/slack/oauth_redirect`. Save.
+
+### 4. Event Subscriptions
+
+**Event Subscriptions** → enable.
+
+- **Request URL**: `https://<your-domain>/slack/events`
+- **Subscribe to bot events**: `app_mention`, `message.im`, `app_home_opened`, `app_uninstalled`
+
+Save.
+
+### 5. Interactivity & Shortcuts
+
+**Interactivity & Shortcuts** → enable.
+
+- **Request URL**: `https://<your-domain>/slack/events`
+
+Save.
+
+### 6. App Home
+
+**App Home** → enable the **Home Tab**. (Optional: disable the Messages tab if you don't want users typing arbitrary DMs.)
+
+### 7. Manage Distribution (this is what creates the install link)
+
+**Manage Distribution** → review the checklist Slack shows you:
+
+- ✅ Remove hard-coded information (the redirect URL above is dynamic)
+- ✅ OAuth redirect URLs configured (step 3)
+- Once green, click **Activate Public Distribution**.
+
+After activation, the **Sharable URL** Slack shows is just for the embedded "Add to Slack" button. **The real install entrypoint for your bot is your own server's `/slack/install` URL**, which renders a friendly landing page and then hands off to Slack's OAuth flow.
+
+### 8. Copy credentials into `.env`
+
+From **Basic Information** → **App Credentials**:
+
+- `Client ID`        → `SLACK_CLIENT_ID`
+- `Client Secret`    → `SLACK_CLIENT_SECRET`
+- `Signing Secret`   → `SLACK_SIGNING_SECRET`
+
+Generate a state secret yourself (used to sign the OAuth state param):
+
+```bash
+openssl rand -hex 32
+```
+
+Paste that as `SLACK_STATE_SECRET`.
+
+Also set `BASE_URL` to your public HTTPS URL (e.g. `https://abcd-1234.ngrok-free.app`).
+
+### 9. Share with your friends 🎉
+
+The install link you give them is:
+
+```
+<BASE_URL>/slack/install
+```
+
+When they click it:
+1. They land on a friendly "Add to Slack" page.
+2. They click → Slack asks them to authorize the bot for one of their workspaces.
+3. Slack redirects to `<BASE_URL>/slack/oauth_redirect` with a code.
+4. The bot exchanges the code for a bot token and stores it in the `SlackInstallation` Neon table.
+5. They see a "🎉 You're all set!" page.
+6. The bot is now live in their workspace. They invite it to a channel and `@AI COO` away.
+
+Each workspace has its own bot token in the database. Tasks, progress updates, and Home Tab are all team-scoped.
 
 ---
 
 ## Local Development
 
 ```bash
-# 1. Install dependencies
+# 1. Install deps + push schema
 npm install
-
-# 2. Generate Prisma client & sync schema
 npx prisma db push
 
-# 3. Start the Dev server with auto-reload
-npx nodemon
+# 2. Dev server (auto-reload via nodemon + ts-node)
+npm run dev
 
-# 4. Expose locally via ngrok (in a new terminal)
+# 3. In another terminal, expose port 3000
 ngrok http 3000
 ```
 
-Update Slack’s Request URLs with the ngrok HTTPS endpoint, then mention the bot in Slack:
+Update Slack's Request URLs with the ngrok HTTPS endpoint. Then in Slack:
 
 ```
-@AI COO draft a task to review Q4 forecast with finance tomorrow at 9am PT
+@AI COO ask <@Luna> to draft the Q4 plan by Friday EOD, high priority
 ```
 
 You should see:
-- Slack response from the AI
-- Console log: `🤖 AI triggered tool [CreateTask] with payload: ...`
-- Slack notification about the triggered tool
-- Task card confirming creation
+- A task card in the channel with status, due, priority, and progress bar
+- A DM to Luna with the brief
+- A DM to you confirming creation
+- Your App Home tab repopulates within seconds
+
+If you say only `@AI COO draft Q4 plan`, the bot will reply asking for the assignee and due time **before** creating anything.
 
 ---
 
-## Monitoring Tool Invocations
+## Adding a New Tool
 
-Every AI-triggered tool generates two signals:
+1. Create a file in `src/functions/`, e.g. `bookMeeting.ts`:
 
-1. **Console log**  
-   ```
-   🤖 AI triggered tool [CreateTask] with payload: {"title":"..."}
-   ```
-2. **Slack notification**  
-   The bot posts `🤖 AI triggered tool [CreateTask]` in the same thread, so the team sees what automation just ran.
-
-If parsing fails or a tool is unknown, the orchestrator logs an error and records it in `toolResults`.
-
----
-
-## Adding New Tools
-
-1. Create a file in `src/functions/`, e.g. `scheduleStandup.ts`.
-2. Export `RegisteredFunction`:
    ```ts
    import { RegisteredFunction } from '../orchestrator/functionRegistry';
 
-   export function scheduleStandupFunction(): RegisteredFunction {
+   export function bookMeetingFunction(): RegisteredFunction {
      return {
-       name: 'ScheduleStandup',
-       description: 'Book a daily standup meeting in Google Calendar.',
-       inputExample: '{"time": "09:30", "attendees": ["<@U123>", "<@U456>"]}',
+       name: 'BookMeeting',
+       description: 'Schedule a 30-min meeting in Google Calendar.',
+       inputExample: '{"title":"Roadmap sync","attendees":["<@U1>","<@U2>"],"when":"tomorrow 10am"}',
        handler: async (args, context) => {
-         // validate args, call integrations, send Slack updates, return status
+         // ... validate, call integrations, await context.slack.send(...), return result
+         return { status: 'success', message: 'Booked.', data: { eventId: '...' } };
        },
      };
    }
    ```
-3. Register it in `src/functions/index.ts`:
-   ```ts
-   registry.register(scheduleStandupFunction());
-   ```
-4. Update prompt guidance (optional but recommended) so the AI knows when to use the tool.
 
-The tool automatically appears in the system prompt with purpose + example, so the AI can choose it.
+2. Register it in `src/functions/index.ts`:
+
+   ```ts
+   registry.register(bookMeetingFunction());
+   ```
+
+3. (Optional, recommended) Add a hint to the system prompt in `src/ai/prompt.ts` so the AI knows when to use it.
+
+The new tool auto-appears in the tool catalog the AI is shown.
 
 ---
 
 ## Testing
 
 ```bash
-npm run test
+npm test
 ```
 
-> Note: if running inside a restricted sandbox, `vitest` may fail to kill worker processes (EPERM). Re-run locally outside the sandbox to validate.
+5 test files, 32 tests covering: AI response parsing, scheduler cadence policy, conversation store, reminder lead-time policy, and task normalization.
 
-Future work: add integration tests that mock OpenAI and Slack, verifying consistent tool invocation and DB interactions.
-
----
-
-## Deployment Notes
-
-- Any Node-friendly host (Render, Railway, Fly.io, AWS) works. Ensure `PORT` matches your host’s expectations.
-- Slack request URLs must use your public HTTPS endpoint: `https://yourdomain.com/slack/events`.
-- Keep secrets in the host’s environment settings (never commit them).
-- When you deploy a new prompt or tool, redeploy the service so the runtime picks up the changes.
+Integration tests against real Slack/OpenAI are intentionally **not** included — they require live credentials. For local dry-runs, set `LOG_LEVEL=debug` and watch the structured logs.
 
 ---
 
-## Roadmap Ideas
+## Deployment
 
-- **Tool execution guardrails**: add allow/deny lists or approvals before certain tools run.
-- **Stateful memory**: maintain context across conversations (e.g., current priorities, OKRs).
-- **Advanced analytics**: summarize task load, overdue items, or generate weekly exec readouts.
-- **External connectors**: integrate Notion, Jira, Google Calendar, HubSpot, or email digests.
-- **Observability**: stream tool invocations to a datastore for auditing.
-- **Self-healing prompts**: version prompts, capture AI mistakes, and auto-retrain with better instructions.
+- Any Node host works (Render, Railway, Fly.io, AWS, Heroku).
+- Set all required env vars (see [Environment Variables](#environment-variables)).
+- Use `npm run build && npm start` for production (compiles TS to `dist/`).
+- The schedulers run in-process. If you scale to multiple replicas, run schedulers on **exactly one** instance (e.g. via a leader lock or a singleton worker process) to avoid duplicate nudges.
+- The conversation store is in-memory; restarting the app drops short-term context. For multi-replica deployments, swap `ConversationStore` for a Redis-backed implementation.
 
 ---
 
-Built to evolve: treat prompts like playbooks and functions like toolboxes. As you teach the AI new procedures, it becomes a real operations teammate.***
+## Roadmap
+
+- [ ] Persist conversation history to Postgres or Redis (multi-replica safety)
+- [ ] Slash commands (`/coo new task ...`) for keyboard-driven flows
+- [ ] Recurring tasks (`every Monday`, `daily standup`)
+- [ ] Subtasks + dependency graph (block X until Y)
+- [ ] Weekly exec digest DM (auto-generated)
+- [ ] Calendar / Notion / Jira integrations
+- [ ] Workspace-level priority / OKR awareness in the prompt
+- [ ] Per-employee timezone-aware nudges
+- [ ] Audit export of `ProgressUpdate` log
+
+---
+
+Built as an operations teammate, not a glorified to-do bot. Teach it new playbooks with prompts, give it new tools with functions, and it will execute on the owner's behalf.
