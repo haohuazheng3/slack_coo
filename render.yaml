@@ -22,13 +22,15 @@ services:
         sync: false
       - key: SLACK_STATE_SECRET
         sync: false
-      - key: OPENAI_API_KEY
+      - key: ANTHROPIC_API_KEY
         sync: false
       - key: DATABASE_URL
         sync: false
       - key: BASE_URL
         sync: false
-      - key: OWNER_LANGUAGE
-        value: en
       - key: ORGANIZATION_NAME
         value: Aiptima
+      - key: DEFAULT_TIMEZONE
+        value: America/New_York
+      - key: OPS_JUDGE_CRON
+        value: "*/15 * * * *"

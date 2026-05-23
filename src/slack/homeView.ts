@@ -1,6 +1,6 @@
 import { PrismaClient, Task } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
-import { defaultTranslator, Translator } from '../lib/i18n';
+import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 
 type HomeViewBlock = {
   type: string;
@@ -26,7 +26,7 @@ function sectionGroup(title: string, count: number): HomeViewBlock {
 export async function buildHomeView(
   prisma: PrismaClient,
   ownerId: string,
-  translator: Translator = defaultTranslator
+  translator?: Translator
 ) {
   const tasks = await prisma.task.findMany({
     where: {
@@ -35,6 +35,19 @@ export async function buildHomeView(
     orderBy: [{ status: 'asc' }, { time: 'asc' }],
     take: 200,
   });
+
+  // Detect language from the owner's own task content if the caller didn't
+  // pre-supply a translator. The Home Tab has no configured language — it
+  // mirrors how this workspace actually talks.
+  if (!translator) {
+    const samples: Array<string | null> = [];
+    for (const t of tasks) {
+      samples.push(t.title);
+      samples.push(t.description);
+      samples.push(t.lastProgressSummary);
+    }
+    translator = getTranslator(detectLanguageFromTexts(samples));
+  }
 
   const now = Date.now();
   const groups = {

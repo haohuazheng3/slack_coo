@@ -10,8 +10,8 @@ import { registerCoreFunctions } from './functions';
 import { handleConversationTurn } from './orchestrator/handleConversationTurn';
 import { conversationStore } from './orchestrator/conversationStore';
 
-import { startTaskReminderScheduler } from './scheduler/taskReminder';
 import { startProgressCheckScheduler } from './scheduler/progressCheck';
+import { shouldEngageAmbient } from './orchestrator/ambientGate';
 
 import {
   registerActions,
@@ -33,7 +33,7 @@ const requiredEnv = [
   'SLACK_CLIENT_SECRET',
   'SLACK_SIGNING_SECRET',
   'SLACK_STATE_SECRET',
-  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
   'DATABASE_URL',
 ];
 for (const k of requiredEnv) {
@@ -43,10 +43,16 @@ for (const k of requiredEnv) {
   }
 }
 
+// Ambient-listening scopes: channels:history + groups:history let the bot *see*
+// non-mention messages in channels it's been invited to — without that, we can never
+// be a real colleague-in-the-room, only a tool you summon. Existing workspaces will
+// need to re-install to grant the new scopes; that's unavoidable.
 const BOT_SCOPES = [
   'app_mentions:read',
   'chat:write',
   'chat:write.public',
+  'channels:history',
+  'groups:history',
   'im:history',
   'im:read',
   'im:write',
@@ -129,6 +135,7 @@ app.event('app_mention', async ({ event, client, context }) => {
     threadTs,
     fallbackTs: ts,
     text: sanitized || text,
+    triggerHint: 'app_mention',
   });
 });
 
@@ -144,29 +151,88 @@ app.message(async ({ message, client, context }) => {
 
   if (!userId || !channelId || !text) return;
 
-  if (channelId.startsWith('D') && isAwaitingReasonFromUser(userId)) {
+  const teamId = context.teamId ?? null;
+  const enterpriseId = context.enterpriseId ?? null;
+  const isDm = channelId.startsWith('D');
+
+  if (isDm && isAwaitingReasonFromUser(userId)) {
     const handled = await consumeReasonReply(userId, channelId, text, client);
     if (handled) return;
   }
 
-  const isDm = channelId.startsWith('D');
-  if (!isDm) {
-
-    if (!threadTs) return;
-    const key = getConversationKey(channelId, threadTs, ts);
-    if (!conversationStore.has(key)) return;
+  // DMs always get the full turn — that surface is 1:1 and intentional.
+  if (isDm) {
+    await handleConversationTurn({
+      client,
+      registry: functionRegistry,
+      userId,
+      channelId,
+      teamId,
+      enterpriseId,
+      threadTs,
+      fallbackTs: ts,
+      text,
+      triggerHint: 'dm',
+    });
+    return;
   }
 
+  // In channels: if this is a follow-up inside a thread the bot is already part of,
+  // continue the conversation without re-gating — it's clearly addressed to us.
+  if (threadTs) {
+    const key = getConversationKey(channelId, threadTs, ts);
+    if (conversationStore.has(key)) {
+      await handleConversationTurn({
+        client,
+        registry: functionRegistry,
+        userId,
+        channelId,
+        teamId,
+        enterpriseId,
+        threadTs,
+        fallbackTs: ts,
+        text,
+        triggerHint: 'thread_followup',
+      });
+      return;
+    }
+  }
+
+  // Ambient path: any other channel message. Let the cheap LLM gate decide whether
+  // we'd add value by engaging. Defaults to silence — if the gate says no, this
+  // handler returns without the user ever knowing the bot was listening.
+  const botUserId = context.botUserId ?? (await getBotUserId(teamId, enterpriseId));
+  let gate;
+  try {
+    gate = await shouldEngageAmbient({
+      prisma,
+      teamId,
+      enterpriseId,
+      channelId,
+      speakerUserId: userId,
+      text,
+      isSelf: botUserId ? userId === botUserId : false,
+      botUserId,
+    });
+  } catch (err) {
+    log.warn('Ambient gate threw — staying silent', { error: String(err) });
+    return;
+  }
+
+  if (!gate.engage) return;
+
+  log.info('Ambient gate engaged', { channelId, userId, why: gate.why });
   await handleConversationTurn({
     client,
     registry: functionRegistry,
     userId,
     channelId,
-    teamId: context.teamId ?? null,
-    enterpriseId: context.enterpriseId ?? null,
+    teamId,
+    enterpriseId,
     threadTs,
     fallbackTs: ts,
     text,
+    triggerHint: `ambient:${gate.why}`,
   });
 });
 
@@ -208,7 +274,6 @@ app.event('app_uninstalled', async ({ context }) => {
     baseUrl: BASE_URL || '(set BASE_URL for the landing page link)',
   });
 
-  startTaskReminderScheduler();
   startProgressCheckScheduler(functionRegistry);
 })();
 

@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
-import { defaultTranslator, Translator } from '../lib/i18n';
+import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 
 export type TaskListOptions = {
   showCompleted?: boolean;
@@ -18,7 +18,8 @@ export async function buildTaskListMessage(
   userId: string,
   options: TaskListOptions = {}
 ): Promise<TaskListMessage> {
-  const { showCompleted = false, showAll = false, translator = defaultTranslator } = options;
+  const { showCompleted = false, showAll = false } = options;
+  let { translator } = options;
 
   const whereClause: any = {
     OR: [
@@ -42,6 +43,16 @@ export async function buildTaskListMessage(
     orderBy: { time: 'asc' },
     take: 50,
   });
+
+  if (!translator) {
+    const samples: Array<string | null> = [];
+    for (const t of tasks) {
+      samples.push(t.title);
+      samples.push(t.description);
+      samples.push(t.lastProgressSummary);
+    }
+    translator = getTranslator(detectLanguageFromTexts(samples));
+  }
 
   if (tasks.length === 0) {
     const emptyText = showCompleted

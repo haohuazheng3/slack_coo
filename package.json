@@ -24,7 +24,8 @@
     "operations",
     "chief-of-staff",
     "aiptima",
-    "openai",
+    "anthropic",
+    "claude",
     "prisma"
   ],
   "author": "",
@@ -39,13 +40,13 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
     "@prisma/client": "^6.18.0",
     "@slack/bolt": "^4.4.0",
     "@slack/web-api": "^7.9.3",
     "@supabase/supabase-js": "^2.52.1",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
-    "node-cron": "^4.2.1",
-    "openai": "^5.10.2"
+    "node-cron": "^4.2.1"
   }
 }

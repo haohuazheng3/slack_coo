@@ -1,4 +1,5 @@
-import { openai } from '../ai/openaiClient';
+import type Anthropic from '@anthropic-ai/sdk';
+import { anthropic, extractText, PRIMARY_MODEL } from '../ai/anthropic';
 import { buildSystemPrompt } from '../ai/prompt';
 import {
   FunctionExecutionContext,
@@ -7,19 +8,21 @@ import {
 } from './functionRegistry';
 import { ConversationMessage } from './conversationStore';
 import { extractFunctionCalls, ParsedFunctionCall } from './parseAiResponse';
-import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { createLogger } from '../lib/logger';
 
 const log = createLogger('Orchestrator');
 
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
-const DEFAULT_TEMPERATURE = Number(process.env.OPENAI_TEMPERATURE ?? '0.2');
+const MAX_OUTPUT_TOKENS = Number(process.env.ANTHROPIC_MAX_TOKENS ?? '16000');
 
 export type OrchestratorInput = {
   registry: FunctionRegistry;
   messages: ConversationMessage[];
   context: FunctionExecutionContext;
   organizationName?: string;
+  /** Compact "what's going on" block dropped into the system prompt verbatim. */
+  situationBlock?: string;
+  /** Short string describing what triggered this turn (mention / dm / ambient_*). */
+  triggerHint?: string;
 };
 
 export type ToolResultEntry = {
@@ -119,10 +122,10 @@ async function executeOneCall(
 export async function runAiOrchestrator(
   input: OrchestratorInput
 ): Promise<OrchestratorOutput> {
-  const { registry, messages, context, organizationName } = input;
+  const { registry, messages, context, organizationName, situationBlock, triggerHint } = input;
   const functions = registry.list();
 
-  const systemPrompt = buildSystemPrompt(functions, {
+  const systemBlocks = buildSystemPrompt(functions, {
     userMention: `<@${context.slack.userId}>`,
     channelId: context.slack.channelId,
     threadTs: context.slack.threadTs,
@@ -130,37 +133,39 @@ export async function runAiOrchestrator(
     organizationName,
     currentIsoTime: new Date().toISOString(),
     timezone: process.env.DEFAULT_TIMEZONE,
-    ownerLanguageHint: process.env.OWNER_LANGUAGE || undefined,
+    situationBlock,
+    triggerHint,
   });
 
-  const chatMessages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: systemPrompt },
-    ...messages.map(
-      (message): ChatCompletionMessageParam => ({
-        role: message.role as 'user' | 'assistant',
-        content: message.content,
-      })
-    ),
-  ];
+  // Anthropic does not allow a system role inside `messages` — system goes in
+  // its own parameter. The first message MUST be `user`; in our flow every
+  // turn starts with a user payload, so this is naturally satisfied.
+  const conversationMessages: Anthropic.MessageParam[] = messages.map((m) => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }));
 
-  let completion;
+  let response: Anthropic.Message;
   try {
-    completion = await openai.chat.completions.create({
-      model: DEFAULT_MODEL,
-      temperature: DEFAULT_TEMPERATURE,
-      messages: chatMessages,
+    response = await anthropic.messages.create({
+      model: PRIMARY_MODEL,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      // Adaptive thinking lets Opus decide when judgment depth is needed —
+      // no fixed budget. This is the only `thinking` mode allowed on 4.7.
+      thinking: { type: 'adaptive' },
+      system: systemBlocks,
+      messages: conversationMessages,
     });
   } catch (error: any) {
-    log.error('OpenAI request failed', { error: error?.message ?? String(error) });
+    log.error('Anthropic request failed', { error: error?.message ?? String(error) });
     return {
-      finalReply:
-        '⚠️ I had trouble reaching my reasoning engine. Could you try again in a moment?',
+      finalReply: '',
       toolResults: [],
     };
   }
 
-  const response = completion.choices[0]?.message?.content ?? '';
-  const { cleanedText, calls } = extractFunctionCalls(response);
+  const rawText = extractText(response);
+  const { cleanedText, calls } = extractFunctionCalls(rawText);
 
   const toolResults: ToolResultEntry[] = [];
   for (const call of calls) {

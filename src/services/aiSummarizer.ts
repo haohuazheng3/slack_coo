@@ -1,11 +1,10 @@
 import { TaskStatus } from '@prisma/client';
-import { openai } from '../ai/openaiClient';
+import { anthropic, extractText, PRIMARY_MODEL } from '../ai/anthropic';
 import { createLogger } from '../lib/logger';
 
 const log = createLogger('AiSummarizer');
 
 export type EmployeeProgressInterpretation = {
-
   status: TaskStatus;
   progressPercent: number;
   ownerSummary: string;
@@ -14,19 +13,34 @@ export type EmployeeProgressInterpretation = {
 
 const SYSTEM_PROMPT = `You are an executive assistant. Given an employee's free-form Slack reply about a task, produce a structured JSON object the owner can scan in 1 second.
 
-Output STRICT JSON with these keys:
+Output JSON with these keys:
   - status: one of NOT_STARTED, IN_PROGRESS, BLOCKED, COMPLETED, FAILED
   - progressPercent: integer 0-100, your best estimate based on the reply
-  - ownerSummary: one short sentence (<=140 chars) in the owner's language, third-person, action-oriented, no fluff
-  - blocker: optional one short sentence describing what's blocking them, only if status=BLOCKED
+  - ownerSummary: one short sentence (<=140 chars), third-person, action-oriented, no fluff. CRITICAL — write it in the same language as the employee's reply (and the task title). If the reply is in 中文, write the summary in 中文; if English, English. Never default to English.
+  - blocker: optional one short sentence describing what's blocking them, only if status=BLOCKED (same language rule)
 
 Rules:
-  - If reply clearly indicates completion (e.g. "done", "finished", "shipped"), status=COMPLETED, progressPercent=100.
+  - If reply clearly indicates completion (e.g. "done", "finished", "shipped", "完成", "搞定"), status=COMPLETED, progressPercent=100.
   - If reply says they have not started, status=NOT_STARTED, progressPercent=0.
-  - If reply describes work in progress without a hard blocker, status=IN_PROGRESS, estimate based on language ("about half" -> 50, "almost done" -> 85, "just started" -> 15).
+  - If reply describes work in progress without a hard blocker, status=IN_PROGRESS, estimate based on language ("about half" / "差不多一半" -> 50, "almost done" / "快好了" -> 85, "just started" / "刚开始" -> 15).
   - If reply describes a blocker / dependency / waiting on someone, status=BLOCKED. Estimate progressPercent reflecting how far along they were when blocked.
   - If reply says they cannot do it, status=FAILED.
-  - ownerSummary must be a neutral, factual paraphrase suitable for a CEO dashboard. Never say "the employee said".`;
+  - ownerSummary must be a neutral, factual paraphrase. Never say "the employee said". Never grade — no "slow", "good", "concerning". Just facts.`;
+
+const SUMMARIZER_SCHEMA = {
+  type: 'object',
+  properties: {
+    status: {
+      type: 'string',
+      enum: ['NOT_STARTED', 'IN_PROGRESS', 'BLOCKED', 'COMPLETED', 'FAILED'],
+    },
+    progressPercent: { type: 'integer', enum: Array.from({ length: 101 }, (_, i) => i) as number[] },
+    ownerSummary: { type: 'string' },
+    blocker: { type: 'string' },
+  },
+  required: ['status', 'progressPercent', 'ownerSummary'],
+  additionalProperties: false,
+};
 
 export async function interpretEmployeeProgress(args: {
   taskTitle: string;
@@ -46,19 +60,23 @@ export async function interpretEmployeeProgress(args: {
   };
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_SUMMARY_MODEL || 'gpt-4.1-mini',
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: JSON.stringify(userPayload) },
+    const response = await anthropic.messages.create({
+      model: PRIMARY_MODEL,
+      max_tokens: 1000,
+      system: [
+        {
+          type: 'text',
+          text: SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' },
+        },
       ],
-    });
-
-    const raw = completion.choices[0]?.message?.content ?? '{}';
-    const parsed = JSON.parse(raw) as Partial<EmployeeProgressInterpretation>;
-
+      messages: [{ role: 'user', content: JSON.stringify(userPayload) }],
+      output_config: {
+        format: { type: 'json_schema', schema: SUMMARIZER_SCHEMA },
+      },
+    } as any);
+    const text = extractText(response);
+    const parsed = JSON.parse(text) as Partial<EmployeeProgressInterpretation>;
     return normalizeInterpretation(parsed, args.employeeReply);
   } catch (err) {
     log.warn('AI summarizer failed, falling back to heuristic', { error: String(err) });
@@ -88,24 +106,27 @@ function normalizeInterpretation(
 }
 
 function heuristicInterpretation(reply: string): EmployeeProgressInterpretation {
+  // Last-resort fallback if the LLM is unavailable. Language-aware where it can be,
+  // but the LLM path should be hitting in >99% of cases — this is here so a transient
+  // API outage doesn't lose an employee's status update entirely.
   const lower = reply.toLowerCase();
   if (/(done|finished|completed|shipped|完成|做完|搞定)/.test(lower)) {
-    return { status: 'COMPLETED', progressPercent: 100, ownerSummary: 'Reported completion.' };
+    return { status: 'COMPLETED', progressPercent: 100, ownerSummary: reply.trim().slice(0, 140) };
   }
   if (/(blocked|stuck|waiting|depend|阻塞|卡住|等)/.test(lower)) {
     return {
       status: 'BLOCKED',
       progressPercent: 40,
-      ownerSummary: 'Blocked / awaiting dependency.',
+      ownerSummary: reply.trim().slice(0, 140),
       blocker: reply.trim().slice(0, 140),
     };
   }
   if (/(not started|haven['’]t started|没开始|还没)/.test(lower)) {
-    return { status: 'NOT_STARTED', progressPercent: 0, ownerSummary: 'Has not started yet.' };
+    return { status: 'NOT_STARTED', progressPercent: 0, ownerSummary: reply.trim().slice(0, 140) };
   }
   return {
     status: 'IN_PROGRESS',
     progressPercent: 50,
-    ownerSummary: reply.trim().slice(0, 140) || 'Work in progress.',
+    ownerSummary: reply.trim().slice(0, 140),
   };
 }

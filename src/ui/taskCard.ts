@@ -1,7 +1,7 @@
 import { Task } from '@prisma/client';
 import { toSlackMention } from '../utils/assignee';
 import { buildProgressBar } from './progressBar';
-import { defaultTranslator, Translator } from '../lib/i18n';
+import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 
 export type RenderableTask = Pick<
   Task,
@@ -43,7 +43,15 @@ export function buildTaskCardBlocks(
   task: RenderableTask,
   options: CardOptions = {}
 ): any[] {
-  const { variant = 'channel', showActions = true, translator = defaultTranslator } = options;
+  // If the caller didn't pre-pick a language, detect from this task's own text.
+  // Single-task surfaces (channel card, action edit) work this way; surfaces that
+  // render many tasks (Home Tab, list view) pre-supply a translator built from
+  // the whole set so individual cards don't flicker between languages.
+  const {
+    variant = 'channel',
+    showActions = true,
+    translator = getTranslator(detectLanguageFromTexts([task.title, task.description, task.lastProgressSummary])),
+  } = options;
   const statusIcon = translator.statusIcon(task.status);
   const statusLabel = translator.statusLabel(task.status);
   const priorityBadge = translator.priorityBadge(task.priority);
@@ -171,9 +179,10 @@ export function buildTaskCardBlocks(
 
 export function buildTaskFallbackText(
   task: RenderableTask,
-  translator: Translator = defaultTranslator
+  translator?: Translator
 ): string {
-  return `[${translator.statusLabel(task.status)}] ${task.title} • ${translator.t(
-    'card.due'
-  )} ${task.time.toLocaleString()}`;
+  const t =
+    translator ??
+    getTranslator(detectLanguageFromTexts([task.title, task.description, task.lastProgressSummary]));
+  return `[${t.statusLabel(task.status)}] ${task.title} • ${t.t('card.due')} ${task.time.toLocaleString()}`;
 }

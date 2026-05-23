@@ -5,6 +5,7 @@ import { conversationStore } from './conversationStore';
 import { prisma } from '../lib/prisma';
 import { buildChannelSender, buildUserMessagePayload, getConversationKey } from '../lib/sendHelpers';
 import { createLogger } from '../lib/logger';
+import { buildSituationBlock } from '../services/situationBlock';
 
 const log = createLogger('Turn');
 
@@ -21,6 +22,9 @@ export type ConversationTurnInput = {
   fallbackTs?: string;
   text: string;
   metadata?: Record<string, unknown>;
+
+  /** Short string describing what produced this turn (mention / dm / ambient / etc). */
+  triggerHint?: string;
 };
 
 /**
@@ -39,19 +43,37 @@ export async function handleConversationTurn(input: ConversationTurnInput): Prom
     fallbackTs,
     text,
     metadata,
+    triggerHint,
   } = input;
 
   const conversationKey = getConversationKey(channelId, threadTs, fallbackTs);
   const sendThreadTs = threadTs ?? fallbackTs;
+  const isDirectMessage = channelId.startsWith('D');
 
   const send = buildChannelSender(client, channelId, sendThreadTs);
 
   const userPayload = buildUserMessagePayload({ userId, channelId, text, metadata });
   conversationStore.append(conversationKey, { role: 'user', content: userPayload });
 
+  let situationBlock: string | undefined;
+  try {
+    situationBlock = await buildSituationBlock({
+      prisma,
+      teamId: teamId ?? null,
+      enterpriseId: enterpriseId ?? null,
+      speakerUserId: userId,
+      channelId,
+      isDirectMessage,
+    });
+  } catch (err) {
+    log.warn('Failed to build situation block (continuing without)', { error: String(err) });
+  }
+
   const result = await runAiOrchestrator({
     registry,
     messages: conversationStore.get(conversationKey),
+    situationBlock,
+    triggerHint,
     context: {
       slack: {
         client,
@@ -67,7 +89,9 @@ export async function handleConversationTurn(input: ConversationTurnInput): Prom
     },
   });
 
-  if (result.finalReply) {
+  // An empty final reply is a deliberate, valid outcome — the model decided silence
+  // was the right move this turn. Don't echo, don't placeholder, don't apologize.
+  if (result.finalReply && result.finalReply.trim()) {
     try {
       await send(result.finalReply);
     } catch (err) {

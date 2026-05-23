@@ -9,7 +9,31 @@ function pickLanguage(value?: string | null): SupportedLanguage {
   return 'en';
 }
 
-const ENV_LANGUAGE: SupportedLanguage = pickLanguage(process.env.OWNER_LANGUAGE);
+// CJK Unified Ideographs ranges (covers Chinese, Japanese kanji). We don't try to
+// distinguish further than zh-vs-not — the SupportedLanguage union is zh|en today;
+// add more as the UI grows.
+const CJK_RANGE = /[一-鿿㐀-䶿]/;
+
+/**
+ * Pick a language from a handful of natural-language samples — task titles, recent
+ * progress summaries, anything that reflects how the workspace actually talks.
+ * The product has no configured language; this is how we figure it out at render time.
+ */
+export function detectLanguageFromTexts(texts: Array<string | null | undefined>): SupportedLanguage {
+  let cjk = 0;
+  let latin = 0;
+  for (const raw of texts) {
+    if (!raw) continue;
+    for (const ch of raw) {
+      if (CJK_RANGE.test(ch)) cjk++;
+      else if (/[a-zA-Z]/.test(ch)) latin++;
+    }
+  }
+  // Tilt toward zh once CJK characters dominate. A few stray English words in a
+  // mostly-Chinese workspace shouldn't flip the result.
+  if (cjk > 0 && cjk >= latin * 0.5) return 'zh';
+  return 'en';
+}
 
 const STATUS_LABEL: Record<SupportedLanguage, Record<TaskStatus, string>> = {
   en: {
@@ -218,8 +242,11 @@ export type Translator = {
 };
 
 export function getTranslator(language?: SupportedLanguage | string | null): Translator {
+  // Fallback to 'en' when no signal exists. Callers that have task content in
+  // hand should pass it through detectLanguageFromTexts() and call this with
+  // the detected language instead of relying on the fallback.
   const lang: SupportedLanguage =
-    typeof language === 'string' ? pickLanguage(language) : language || ENV_LANGUAGE;
+    typeof language === 'string' ? pickLanguage(language) : (language as SupportedLanguage | undefined) ?? 'en';
   const common = COMMON[lang];
   const status = STATUS_LABEL[lang];
   const priority = PRIORITY_BADGE[lang];

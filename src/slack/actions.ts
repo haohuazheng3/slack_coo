@@ -11,7 +11,6 @@ import {
 import { createLogger } from '../lib/logger';
 import { buildUserMessagePayload, getConversationKey } from '../lib/sendHelpers';
 import { conversationStore } from '../orchestrator/conversationStore';
-import { defaultTranslator } from '../lib/i18n';
 
 const log = createLogger('Actions');
 
@@ -168,10 +167,10 @@ export function registerActions(app: App, registry: FunctionRegistry) {
       const messageChannel = (body as any).channel?.id;
       if (messageTs && messageChannel) {
         try {
+          // Let buildTaskListMessage auto-detect language from the user's tasks.
           const refreshed = await buildTaskListMessage(prisma, userId, {
             showCompleted: false,
             showAll: false,
-            translator: defaultTranslator,
           });
           await client.chat.update({
             channel: messageChannel,
