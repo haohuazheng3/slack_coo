@@ -22,7 +22,13 @@ import { buildHomeView } from './slack/homeView';
 import { getConversationKey } from './lib/sendHelpers';
 
 import { prismaInstallationStore } from './installation/installationStore';
-import { failureHtml, installLandingHtml, sendHtml, successHtml } from './installation/pages';
+import {
+  failureHtml,
+  installLandingHtml,
+  readLangFromRequest,
+  sendHtml,
+  successHtml,
+} from './installation/pages';
 
 dotenv.config();
 
@@ -74,11 +80,15 @@ const receiver = new ExpressReceiver({
     redirectUriPath: '/slack/oauth_redirect',
     installPath: '/slack/install',
     callbackOptions: {
-      success: (_installation, _options, _req, res) => {
-        sendHtml(res as any, successHtml());
+      success: (_installation, _options, req, res) => {
+        // Slack's OAuth redirect doesn't preserve our `?lang=` choice, so the
+        // success page defaults to English with the in-nav switcher available.
+        const lang = req ? readLangFromRequest(req as any) : 'en';
+        sendHtml(res as any, successHtml(lang));
       },
-      failure: (error, _options, _req, res) => {
-        sendHtml(res as any, failureHtml(error?.message ?? String(error)), 500);
+      failure: (error, _options, req, res) => {
+        const lang = req ? readLangFromRequest(req as any) : 'en';
+        sendHtml(res as any, failureHtml(error?.message ?? String(error), lang), 500);
       },
     },
   },
@@ -99,11 +109,12 @@ receiver.router.get('/healthz', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
 });
 
-receiver.router.get('/', (_req, res) => {
+receiver.router.get('/', (req, res) => {
   const installUrl = BASE_URL
     ? `${BASE_URL}/slack/install`
     : '/slack/install';
-  sendHtml(res, installLandingHtml(installUrl));
+  const lang = readLangFromRequest(req);
+  sendHtml(res, installLandingHtml(installUrl, lang));
 });
 
 app.event('app_mention', async ({ event, client, context }) => {
