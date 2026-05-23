@@ -1,6 +1,7 @@
 import { PrismaClient, Task } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
 import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
+import { signDashboardToken } from '../dashboard/auth';
 
 type HomeViewBlock = {
   type: string;
@@ -23,11 +24,25 @@ function sectionGroup(title: string, count: number): HomeViewBlock {
   };
 }
 
+export type HomeViewOptions = {
+  translator?: Translator;
+  /** Pass through so we can mint a signed dashboard URL for the "Open in browser" button. */
+  teamId?: string | null;
+  enterpriseId?: string | null;
+};
+
 export async function buildHomeView(
   prisma: PrismaClient,
   ownerId: string,
-  translator?: Translator
+  optionsOrTranslator?: HomeViewOptions | Translator
 ) {
+  // Back-compat: older call sites pass a bare Translator as the 3rd arg.
+  const options: HomeViewOptions =
+    optionsOrTranslator && 'language' in (optionsOrTranslator as Translator)
+      ? { translator: optionsOrTranslator as Translator }
+      : ((optionsOrTranslator as HomeViewOptions) ?? {});
+  let { translator } = options;
+  const { teamId = null, enterpriseId = null } = options;
   const tasks = await prisma.task.findMany({
     where: {
       OR: [{ initiator: ownerId }, { createdBy: ownerId }],
@@ -71,8 +86,32 @@ export async function buildHomeView(
   const blocks: HomeViewBlock[] = [
     header(translator.t('home.title')),
     context(translator.t('home.hint')),
-    divider(),
   ];
+
+  // "Open in browser" — only render when we can actually produce a working URL.
+  // Needs both BASE_URL (so the link resolves) and teamId (so the token has
+  // a workspace to scope to). Skip silently otherwise — better no button than
+  // a broken one.
+  const baseUrl = (process.env.BASE_URL ?? '').replace(/\/$/, '');
+  if (baseUrl && teamId) {
+    const token = signDashboardToken({ userId: ownerId, teamId, enterpriseId });
+    const dashboardUrl = `${baseUrl}/dashboard?token=${encodeURIComponent(token)}`;
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: translator.t('home.openInBrowser') },
+          style: 'primary',
+          url: dashboardUrl,
+          action_id: 'open_dashboard',
+        },
+      ],
+    });
+    blocks.push(context(translator.t('home.openInBrowserHint')));
+  }
+
+  blocks.push(divider());
 
   // First-time onboarding: if the owner has no tasks yet, show a short walkthrough card
   // at the top instead of just an empty board. Disappears the moment a task exists.

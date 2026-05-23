@@ -30,6 +30,10 @@ import {
   successHtml,
 } from './installation/pages';
 
+import { verifyDashboardToken } from './dashboard/auth';
+import { buildDashboardSnapshot } from './dashboard/data';
+import { renderDashboard, renderExpiredOrInvalid, LANG_SWITCH_PLACEHOLDER } from './dashboard/pages';
+
 dotenv.config();
 
 const log = createLogger('App');
@@ -115,6 +119,49 @@ receiver.router.get('/', (req, res) => {
     : '/slack/install';
   const lang = readLangFromRequest(req);
   sendHtml(res, installLandingHtml(installUrl, lang));
+});
+
+// Dashboard — opened from the Slack Home tab via a signed URL. The token in
+// the query proves which Slack user (and which workspace) is asking; we never
+// trust a `userId` from the request body or query directly. See dashboard/auth.ts.
+receiver.router.get('/dashboard', async (req, res) => {
+  const token = (req.query?.token ?? '').toString();
+  const langQuery = (req.query?.lang ?? '').toString().toLowerCase();
+  const langOverride = langQuery === 'en' || langQuery === 'zh' ? langQuery : null;
+
+  const verified = verifyDashboardToken(token);
+  if (!verified.ok) {
+    // Don't leak which failure mode it was — same screen for expired vs forged.
+    sendHtml(res, renderExpiredOrInvalid(langOverride ?? 'en'), 401);
+    return;
+  }
+  const { uid, tid, eid } = verified.payload;
+
+  try {
+    const snapshot = await buildDashboardSnapshot({
+      prisma,
+      ownerId: uid,
+      teamId: tid,
+      enterpriseId: eid,
+    });
+
+    // Deep-link back to Slack — opens the Aiptima Home tab if possible.
+    const slackDeepLink = tid
+      ? `slack://app?team=${encodeURIComponent(tid)}&id=A_AIPTIMA&tab=home`
+      : 'https://slack.com/';
+
+    let html = renderDashboard({ snapshot, langOverride, slackDeepLink });
+
+    // Swap the lang-switcher placeholder for real URLs that preserve the token.
+    // (We don't want the token interpolated twice into the template body.)
+    const baseUrl = `/dashboard?token=${encodeURIComponent(token)}&lang=`;
+    html = html.split(LANG_SWITCH_PLACEHOLDER).join(baseUrl);
+
+    sendHtml(res, html);
+  } catch (err) {
+    log.error('Dashboard render failed', { error: String(err), uid });
+    sendHtml(res, renderExpiredOrInvalid(langOverride ?? 'en'), 500);
+  }
 });
 
 app.event('app_mention', async ({ event, client, context }) => {
@@ -247,10 +294,13 @@ app.message(async ({ message, client, context }) => {
   });
 });
 
-app.event('app_home_opened', async ({ event, client }) => {
+app.event('app_home_opened', async ({ event, client, context }) => {
   const userId = (event as any).user as string;
   try {
-    const view = await buildHomeView(prisma, userId);
+    const view = await buildHomeView(prisma, userId, {
+      teamId: context.teamId ?? null,
+      enterpriseId: context.enterpriseId ?? null,
+    });
     await client.views.publish({ user_id: userId, view });
   } catch (err) {
     log.error('Failed to publish home view', { userId, error: String(err) });

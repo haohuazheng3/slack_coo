@@ -79,10 +79,30 @@ export async function persistChannelMessageTs(taskId: string, ts: string | null)
 
 /**
  * Publishes a fresh App Home view to the given owner. Safe to call frequently.
+ *
+ * Pass the workspace ids when you have them — we need them to mint the dashboard
+ * URL embedded in the Home view. If omitted, we resolve them lazily by calling
+ * `client.auth.test()` so the button still works; that's one extra Slack API
+ * call per render, which is fine for the cadence Home is refreshed at.
  */
-export async function refreshOwnerHome(client: WebClient, ownerId: string) {
+export async function refreshOwnerHome(
+  client: WebClient,
+  ownerId: string,
+  workspace?: { teamId?: string | null; enterpriseId?: string | null }
+) {
   try {
-    const view = await buildHomeView(prisma, ownerId);
+    let teamId = workspace?.teamId ?? null;
+    let enterpriseId = workspace?.enterpriseId ?? null;
+    if (!teamId) {
+      try {
+        const who = (await client.auth.test()) as any;
+        teamId = who?.team_id ?? null;
+        enterpriseId = who?.enterprise_id ?? null;
+      } catch {
+        // Skip — buildHomeView will just render without the dashboard button.
+      }
+    }
+    const view = await buildHomeView(prisma, ownerId, { teamId, enterpriseId });
     await client.views.publish({ user_id: ownerId, view });
   } catch (err) {
     log.error('Failed to publish home view', { ownerId, error: String(err) });

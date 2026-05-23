@@ -84,6 +84,8 @@ const PRIORITY_BADGE: Record<SupportedLanguage, Record<TaskPriority, string>> = 
 type CommonKey =
   | 'home.title'
   | 'home.hint'
+  | 'home.openInBrowser'
+  | 'home.openInBrowserHint'
   | 'home.summary.needInput'
   | 'home.summary.inFlight'
   | 'home.summary.blocked'
@@ -129,6 +131,9 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'home.title': '📊 Aiptima — Operations Dashboard',
     'home.hint':
       '_Just DM me or @-mention me in a channel. Talk to me like a teammate — I\'ll figure out the structure, follow up with the team, and surface what you need to see._',
+    'home.openInBrowser': '🌐 Open full dashboard',
+    'home.openInBrowserHint':
+      '_Workload heatmap, risk feed, full activity timeline — too much for Slack to render, so we built it as a web view._',
     'home.summary.needInput': '{n} need input',
     'home.summary.inFlight': '{n} in flight',
     'home.summary.blocked': '{n} blocked',
@@ -179,6 +184,9 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'home.title': '📊 Aiptima — 任务运营看板',
     'home.hint':
       '_直接 DM 我或在任意频道 @ 我。说人话就行——我来拆任务、跟员工对齐、把进度（包括沉默）按你想看到的方式呈现。_',
+    'home.openInBrowser': '🌐 打开完整看板',
+    'home.openInBrowserHint':
+      '_工作量热图、风险任务区、完整动态时间线——Slack 装不下,我们做了一个网页版。_',
     'home.summary.needInput': '{n} 项待补充',
     'home.summary.inFlight': '{n} 项进行中',
     'home.summary.blocked': '{n} 项受阻',
