@@ -1,7 +1,7 @@
 {
-  "name": "slack-coo",
+  "name": "aiptima",
   "version": "2.1.0",
-  "description": "AI Chief Operating Officer for Slack — turns owner intent into clarified, assigned, tracked, and reported work.",
+  "description": "Aiptima — the execution hub between business owners and their team, inside Slack. Turns plain-language intent into structured, tracked work; translates between owner and team; surfaces facts (including silence) without ever judging an employee.",
   "main": "dist/index.js",
   "engines": {
     "node": ">=20.0.0"
@@ -22,7 +22,8 @@
     "slack",
     "ai",
     "operations",
-    "coo",
+    "chief-of-staff",
+    "aiptima",
     "openai",
     "prisma"
   ],

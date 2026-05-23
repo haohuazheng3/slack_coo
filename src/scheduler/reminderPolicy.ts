@@ -1,3 +1,5 @@
+import { TaskPriority } from '@prisma/client';
+
 /**
  * Policy: choose a reminder lead time based on how far in the future the task deadline is.
  * Returns milliseconds to subtract from deadline to compute the reminder time.
@@ -21,4 +23,28 @@ export function computeReminderLeadMs(msUntil: number): number {
   if (msUntil <= 24 * h) return 2 * h;   // <=24h -> 2h before
   if (msUntil <= 72 * h) return 4 * h;   // <=72h -> 4h before
   return 6 * h;                          // >72h -> 6h before
+}
+
+/**
+ * Silence sensitivity dial (per product brief red line #5).
+ *
+ * After the bot pings an employee for a status update, how long do we wait for a reply
+ * before we surface the silence to the owner? Higher priority = shorter tolerance.
+ *
+ * These are defaults; future work can let the owner override per-task in the UI.
+ */
+export type SilencePolicy = { surfaceAfterMs: number };
+
+const MIN = 60 * 1000;
+const HR = 60 * MIN;
+
+const SILENCE_THRESHOLDS: Record<TaskPriority, number> = {
+  URGENT: Number(process.env.SILENCE_THRESHOLD_URGENT_MS ?? `${1 * HR}`),
+  HIGH: Number(process.env.SILENCE_THRESHOLD_HIGH_MS ?? `${3 * HR}`),
+  NORMAL: Number(process.env.SILENCE_THRESHOLD_NORMAL_MS ?? `${8 * HR}`),
+  LOW: Number(process.env.SILENCE_THRESHOLD_LOW_MS ?? `${24 * HR}`),
+};
+
+export function resolveSilencePolicy(priority: TaskPriority): SilencePolicy {
+  return { surfaceAfterMs: SILENCE_THRESHOLDS[priority] ?? SILENCE_THRESHOLDS.NORMAL };
 }

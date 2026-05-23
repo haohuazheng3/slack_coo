@@ -47,14 +47,19 @@ export function nudgeProgressFunction(): RegisteredFunction {
       const ownerMention = toSlackMention(task.initiator || task.createdBy);
 
       const headerByReason: Record<string, string> = {
-        scheduled: '🤝 Daily check-in',
-        pre_due: '⏰ Quick status before due time',
-        overdue: '⚠️ Task is past due',
-        owner_requested: `🔍 ${ownerMention} asked for an update`,
+        scheduled: `👋 Quick check-in`,
+        pre_due: `⏰ Heads up — due soon`,
+        overdue: `⏰ This was due ${dueText}`,
+        owner_requested: `👋 ${ownerMention} asked how this is going`,
       };
-      const header = headerByReason[args.reason ?? 'scheduled'] ?? '🤝 Status check';
+      const header = headerByReason[args.reason ?? 'scheduled'] ?? '👋 Quick check-in';
 
-      const introLine = (args.customMessage?.trim() || `How's progress on this? Even a sentence helps — I'll summarize it for ${ownerMention}.`);
+      // Per product brief §2.4: low-friction, casual phrasing. We're a teammate asking
+      // "how's it going", NOT a manager demanding a status report. A short reply is enough —
+      // the bot does the translation to owner-language.
+      const introLine =
+        args.customMessage?.trim() ||
+        `How's it going? A one-liner is plenty — "on track" / "halfway" / "blocked on X" works. I'll handle the translation for ${ownerMention}.`;
 
       await slack.client.chat.postMessage({
         channel: dmChannel,

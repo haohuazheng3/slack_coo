@@ -7,6 +7,7 @@ import { updateTaskStatusFunction } from './updateTaskStatus';
 import { updateTaskDetailsFunction } from './updateTaskDetails';
 import { nudgeProgressFunction } from './nudgeProgress';
 import { recordProgressFunction } from './recordProgress';
+import { confirmAliasFunction } from './confirmAlias';
 
 export function registerCoreFunctions(registry: FunctionRegistry) {
   registry.register(askClarificationFunction());
@@ -17,4 +18,5 @@ export function registerCoreFunctions(registry: FunctionRegistry) {
   registry.register(nudgeProgressFunction());
   registry.register(recordProgressFunction());
   registry.register(deleteTaskFunction());
+  registry.register(confirmAliasFunction());
 }

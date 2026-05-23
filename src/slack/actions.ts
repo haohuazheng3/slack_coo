@@ -327,4 +327,61 @@ export function registerActions(app: App, registry: FunctionRegistry) {
       text: '⛔ Got it. In one or two sentences, what is blocking you? (I will summarize this for the owner.)',
     });
   });
+
+  // Owner silence-alert actions (see scheduler/progressCheck.ts).
+  // "Nudge them for me" → bot DMs the assignee again with a soft check-in.
+  // "I'll handle it"    → just acknowledge, suppress further alerts on this silence window.
+  app.action<BlockAction<ButtonAction>>('silence_nudge_assignee', async ({ ack, body, client, action }) => {
+    await ack();
+    const taskId = action.value;
+    if (!taskId) return;
+    try {
+      const task = await prisma.task.findUnique({ where: { id: taskId } });
+      if (!task) return;
+      const { nudgeProgressFunction } = await import('../functions/nudgeProgress');
+      const fn = nudgeProgressFunction();
+      await fn.handler(
+        { taskId, reason: 'owner_requested' },
+        {
+          prisma,
+          slack: {
+            client,
+            channelId: task.channelId,
+            userId: task.assignee,
+            rawText: '',
+            threadTs: undefined,
+            teamId: task.teamId,
+            enterpriseId: task.enterpriseId,
+            send: async () => undefined,
+          },
+        }
+      );
+      await client.chat.postMessage({
+        channel: body.user.id,
+        text: `OK, I just nudged <@${task.assignee}>. I'll loop back the moment they reply.`,
+      });
+    } catch (err) {
+      log.error('silence_nudge_assignee failed', { error: String(err) });
+    }
+  });
+
+  app.action<BlockAction<ButtonAction>>('silence_owner_handles', async ({ ack, body, client, action }) => {
+    await ack();
+    const taskId = action.value;
+    if (!taskId) return;
+    try {
+      // Bump lastSilenceAlertAt so the cron doesn't re-alert on this same window —
+      // the owner has explicitly taken ownership of the follow-up.
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { lastSilenceAlertAt: new Date() },
+      });
+      await client.chat.postMessage({
+        channel: body.user.id,
+        text: `Got it — leaving it with you. I'll keep tracking and surface anything new.`,
+      });
+    } catch (err) {
+      log.error('silence_owner_handles failed', { error: String(err) });
+    }
+  });
 }

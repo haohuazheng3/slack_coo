@@ -18,13 +18,13 @@ const STYLES = `
 
 export function installLandingHtml(installUrl: string): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><title>Install AI COO</title>${STYLES}</head>
+<html lang="en"><head><meta charset="utf-8" /><title>Install Aiptima</title>${STYLES}</head>
 <body>
   <div class="card">
     <div class="emoji">🤖</div>
-    <h1>Add AI COO to your Slack workspace</h1>
-    <p>I'm an AI Chief Operating Officer that turns owner intent into clarified, assigned, tracked, and reported work — directly inside Slack.</p>
-    <p>Click below to grant me the permissions I need (chat, app mentions, DMs, App Home).</p>
+    <h1>Add Aiptima to your Slack workspace</h1>
+    <p>Aiptima is the execution hub between you and your team. Say what you need in plain language; it turns intent into tracked work, translates between you and the team, and surfaces everything (including silence) so nothing falls through.</p>
+    <p>Click below to grant the permissions it needs (chat, app mentions, DMs, App Home).</p>
     <a class="cta" href="${installUrl}">Add to Slack</a>
   </div>
 </body></html>`;
@@ -37,10 +37,10 @@ export function successHtml(): string {
   <div class="card">
     <div class="emoji">🎉</div>
     <h1>You're all set!</h1>
-    <p>AI COO has been installed to your workspace.</p>
-    <p>Open Slack, invite the bot to a channel (or just DM it), and mention it like:<br/>
-       <code>@AI COO ask @Luna to ship the landing page by Friday EOD</code>.</p>
-    <p>Check your <strong>App Home</strong> tab for the operations dashboard.</p>
+    <p>Aiptima has been installed to your workspace.</p>
+    <p>Open Slack and just DM the bot — or invite it to a channel and mention it, like:<br/>
+       <code>@Aiptima ask Luna to ship the landing page by Friday EOD</code>.</p>
+    <p>Your <strong>App Home</strong> tab is the at-a-glance dashboard.</p>
   </div>
 </body></html>`;
 }

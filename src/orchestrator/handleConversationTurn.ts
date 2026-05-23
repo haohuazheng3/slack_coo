@@ -87,11 +87,24 @@ export async function handleConversationTurn(input: ConversationTurnInput): Prom
         content: `ToolResult: ${JSON.stringify({ name: tool.name, data: tool.data })}`,
       });
     } else if (tool.status === 'error') {
-      try {
-        await send(`⚠️ ${tool.name} failed: ${tool.message ?? 'Unknown error'}`);
-      } catch (err) {
-        log.warn('Failed to send tool error notice', { error: String(err) });
-      }
+      // Feed the failure back to the AI so it can recover on the NEXT turn (e.g. CreateTask
+      // returned needs_disambiguation → AI's next turn calls AskClarification with the
+      // candidates). Do NOT echo the raw tool message to the user — those are AI-facing
+      // instruction strings ("Call [AskClarification] first if unknown.") and they leak
+      // internal mechanics. Surface a generic, calm acknowledgment instead.
+      conversationStore.append(conversationKey, {
+        role: 'assistant',
+        content: `ToolResult: ${JSON.stringify({
+          name: tool.name,
+          status: 'error',
+          message: tool.message,
+          data: tool.data,
+        })}`,
+      });
+      // For now, stay silent on tool errors at the chat level — the AI will often
+      // self-recover in the same turn by emitting a recovery tool (e.g. AskClarification).
+      // If a user actually needs to see something, the orchestrator's finalReply already
+      // covers it (since the AI replies BEFORE tool calls execute).
     }
   }
 }

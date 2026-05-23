@@ -201,7 +201,7 @@ app.event('app_uninstalled', async ({ context }) => {
 
 (async () => {
   await app.start(PORT);
-  log.info('Slack AI COO is running (multi-tenant OAuth)', {
+  log.info('Aiptima is running (multi-tenant OAuth)', {
     port: PORT,
     installPath: '/slack/install',
     redirectPath: '/slack/oauth_redirect',

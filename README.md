@@ -1,10 +1,24 @@
-# Slack AI COO — The Bridge Between Owner & Team
+# Aiptima — The Execution Hub Between Owners and Teams
 
-> "Every sentence the founder says, becomes a tracked, accountable piece of work."
+> "Owners say what they need in plain language. Aiptima turns it into tracked work, translates between owner and team, and surfaces facts — including silence — without ever judging an employee."
 
-The AI COO is a Slack app that sits between business owners and their team. When a leader mentions the bot in a channel and assigns work, the AI **clarifies missing details, creates a structured task card, DMs the assignee, follows up on a cadence, summarizes employee replies into owner-readable status updates, and surfaces everything in real time on the owner's App Home dashboard.**
+**Aiptima is the chief-of-staff layer that sits in Slack between a business owner and their team.** It is explicitly *not* an "AI COO" — it does not make decisions for the owner. Instead, it:
 
-The owner no longer has to chase. The COO does.
+- **Translates intent into work.** Owner says "have Lisa do the banner this week"; Aiptima creates the task with a sensible default, DMs Lisa with the context she needs, and confirms back to the owner.
+- **Translates both ways.** Employee says "in調色" / "blocked on copy"; the owner sees "on track, ETA tomorrow" / "blocked — needs copy from marketing".
+- **Surfaces silence as a fact, not a verdict.** If an employee goes quiet, Aiptima tells the owner *"X hours since last reply, deadline is Y, last known state was Z. Want me to nudge, or will you?"* — never *"slow"*, *"unreliable"*, *"concerning"*.
+- **Closes the loop.** When work lands, it notifies the downstream people who were waiting and tells the owner what remains.
+
+The owner keeps every judgment call. Aiptima makes sure nothing falls through the cracks.
+
+### Six red lines (the product's "constitution")
+
+1. **Facts yes, judgment never** — never characterize an employee's performance.
+2. **Guess when you can, ask only on real ambiguity** — every needless question burns owner trust.
+3. **Never demand upfront enrollment** — organizational knowledge grows passively.
+4. **Every employee contribution gets a return** — translate, shield from owner follow-ups, lower the reply bar.
+5. **Silence reporting is a scalpel, not a hammer** — priority-aware thresholds, cooldowns.
+6. **Pressure privately, never shame publicly** — status questions go via DM only.
 
 ---
 
@@ -13,7 +27,7 @@ The owner no longer has to chase. The COO does.
 1. [What's New in v2](#whats-new-in-v2)
 2. [How It Works](#how-it-works)
 3. [The Tool Catalog](#the-tool-catalog)
-4. [Cadence — When the COO Pings Employees](#cadence--when-the-coo-pings-employees)
+4. [Cadence — When Aiptima Pings Employees](#cadence--when-aiptima-pings-employees)
 5. [Project Structure](#project-structure)
 6. [Setup](#setup)
 7. [Environment Variables](#environment-variables)
@@ -31,7 +45,7 @@ The owner no longer has to chase. The COO does.
 | Capability | v1 | v2 |
 | --- | --- | --- |
 | **Distribution** | Single workspace (hard-coded `SLACK_BOT_TOKEN`) | **Multi-tenant OAuth — anyone can install to their own workspace via `/slack/install`** |
-| Ambiguous tasks | Created immediately (often wrong) | **AI asks a clarifying question first via `[AskClarification]`** |
+| Ambiguous tasks | Created immediately (often wrong) | **AI takes a sensible default and invites correction; only asks back on genuine ambiguity (e.g. "which 'Wang' do you mean?")** |
 | Progress tracking | Time-elapsed % only | **Real status enum + AI-estimated 0–100% + summary text** |
 | Employee replies | Stored as raw `notCompletedReason` | **AI summarizes into one CEO-readable sentence, status auto-classified** |
 | Owner notification | None | **DM + Home Tab + channel card all sync in real time** |
@@ -50,26 +64,29 @@ The owner no longer has to chase. The COO does.
 
 ```
         ┌──────────────────────────────────────────────────────┐
-        │  CHANNEL: owner @AI COO "ask Luna to ship landing    │
+        │  CHANNEL: owner @Aiptima "ask Luna to ship landing   │
         │           page by Friday EOD, high priority"         │
         └──────────────────────────────────────────────────────┘
                          │
                          ▼
-            Orchestrator + system prompt
+            Orchestrator + system prompt (6 red lines)
                          │
        ┌─────────────────┴────────────────┐
-       │  Did the owner give title +      │
-       │  assignee + due time?            │
+       │  Resolve assignee (@-mention,    │
+       │  nickname, or context).          │
+       │  Fill missing fields with        │
+       │  sensible defaults.              │
        └─────────────────┬────────────────┘
-              YES        │        NO
+       can resolve       │       genuine ambiguity
                 ▼                  ▼
-      [CreateTask]          [AskClarification]
-        │                          │
-        │                  (owner replies → orchestrator loops back)
+      [CreateTask]          [AskClarification]   (ONLY for real ambiguity,
+        │                          │              e.g. "which 'Wang'?")
+        │                  (owner replies → loops back)
         │
         ├── Posts a task card in the channel (with Mark Complete / Modify)
-        ├── DMs the assignee with the brief
-        ├── DMs the owner with confirmation
+        ├── DMs the assignee with the brief — including *why it matters*,
+        │   a question channel back through the bot, and "one line is fine" reply hint
+        ├── DMs the owner with confirmation + invitation to correct defaults
         └── Refreshes owner's App Home tab
 
          ┌────────────────────────────────────────┐
@@ -133,9 +150,9 @@ The AI orchestrator is allowed to invoke these tools by emitting `[ToolName] {�
 
 ---
 
-## Cadence — When the COO Pings Employees
+## Cadence — When Aiptima Pings Employees
 
-`shouldNudgeTask()` in [`src/scheduler/cadencePolicy.ts`](src/scheduler/cadencePolicy.ts) is the policy. It's **priority-aware** — the COO behaves like a thoughtful chief of staff, not a robot:
+`shouldNudgeTask()` in [`src/scheduler/cadencePolicy.ts`](src/scheduler/cadencePolicy.ts) is the policy. It's **priority-aware** — Aiptima behaves like a thoughtful chief of staff, not a robot:
 
 | Priority | Cooldown | Pre-due window | Daily check-in | Mid-window trigger (4–24h tasks) |
 | -------- | -------- | -------------- | -------------- | -------------------------------- |
@@ -149,9 +166,16 @@ Plus, regardless of priority:
 - Short tasks (<4h until due) only get the pre-due window ping.
 - Overdue tasks get an `overdue` nudge (subject to the priority cooldown).
 
-A separate scheduler auto-marks the task **BLOCKED** if the assignee doesn't reply within 1 hour of a nudge, and DMs the owner.
+### Silence surfacing (NOT auto-judgment)
 
-All hours / cooldowns are environment-driven; see [Environment Variables](#environment-variables).
+If an employee doesn't reply to a check-in, Aiptima does **not** change the task status — that would be a judgment. Instead, after a priority-aware threshold (URGENT 1h / HIGH 3h / NORMAL 8h / LOW 24h — all tunable via env), it sends the **owner** a fact-only DM:
+
+> ⏳ *Banner — Lisa*. Deadline: tomorrow 18:00. Silent for: 1 day. Last known status: "调色中".
+> I don't have new info. Want me to nudge them, or would you rather reach out yourself?  **[Nudge them]** **[I'll handle it]**
+
+The owner decides. The status only changes when the employee actually replies (or the owner explicitly sets it).
+
+All hours / cooldowns / silence thresholds are environment-driven; see [Environment Variables](#environment-variables).
 
 ---
 
@@ -302,6 +326,12 @@ The interesting tunable ones:
 | `OPENAI_SUMMARY_MODEL` | `gpt-4.1-mini` | Model used to summarize employee replies |
 | `PROGRESS_NUDGE_HOUR` | `10` | Hour (server local) for the daily check-in |
 | `PROGRESS_NUDGE_CRON` | `*/10 * * * *` | How often the cadence scheduler ticks |
+| `PROGRESS_SILENCE_CRON` | `*/5 * * * *` | How often the silence-surfacing scheduler ticks |
+| `SILENCE_THRESHOLD_URGENT_MS` | `3600000` (1h) | Silence tolerance for URGENT tasks before surfacing facts to owner |
+| `SILENCE_THRESHOLD_HIGH_MS` | `10800000` (3h) | Silence tolerance for HIGH tasks |
+| `SILENCE_THRESHOLD_NORMAL_MS` | `28800000` (8h) | Silence tolerance for NORMAL tasks |
+| `SILENCE_THRESHOLD_LOW_MS` | `86400000` (24h) | Silence tolerance for LOW tasks |
+| `SILENCE_RE_ALERT_COOLDOWN_MS` | `21600000` (6h) | Min gap between two silence alerts for the same task |
 | `MIN_NUDGE_INTERVAL_MS` | `14400000` (4h) | Cooldown between two nudges for the same task |
 | `CONVERSATION_HISTORY_LIMIT` | `40` | Messages kept per thread for AI context |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
@@ -315,7 +345,7 @@ The interesting tunable ones:
 ### 1. Create the app
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**.
-2. Name it (e.g. "AI COO"), pick any development workspace.
+2. Name it (e.g. "Aiptima"), pick any development workspace.
 
 ### 2. Bot Token Scopes
 
@@ -404,7 +434,7 @@ When they click it:
 3. Slack redirects to `<BASE_URL>/slack/oauth_redirect` with a code.
 4. The bot exchanges the code for a bot token and stores it in the `SlackInstallation` Neon table.
 5. They see a "🎉 You're all set!" page.
-6. The bot is now live in their workspace. They invite it to a channel and `@AI COO` away.
+6. The bot is now live in their workspace. They can just DM it, or invite it to a channel and `@Aiptima` away.
 
 Each workspace has its own bot token in the database. Tasks, progress updates, and Home Tab are all team-scoped.
 
@@ -427,7 +457,7 @@ ngrok http 3000
 Update Slack's Request URLs with the ngrok HTTPS endpoint. Then in Slack:
 
 ```
-@AI COO ask <@Luna> to draft the Q4 plan by Friday EOD, high priority
+@Aiptima ask <@Luna> to draft the Q4 plan by Friday EOD, high priority
 ```
 
 You should see:
@@ -436,7 +466,7 @@ You should see:
 - A DM to you confirming creation
 - Your App Home tab repopulates within seconds
 
-If you say only `@AI COO draft Q4 plan`, the bot will reply asking for the assignee and due time **before** creating anything.
+If you say only `@Aiptima draft Q4 plan`, Aiptima now takes sensible defaults (a default deadline + you as the requester) and creates the task with an invitation to correct it — instead of interrogating you with a clarification question. It only asks back when there is genuine ambiguity it cannot resolve (e.g. "which 'Wang' do you mean?").
 
 ---
 
@@ -496,16 +526,33 @@ Integration tests against real Slack/OpenAI are intentionally **not** included �
 
 ## Roadmap
 
+### Near term (per product brief)
+
+- [ ] **Nickname-based assignee resolution** — read Slack workspace member list, match owner's casual references ("小王", "design"), confirm on ambiguity once, then remember (this is the start of the **organizational-memory moat**).
+- [ ] **`PersonAlias` table** — persist what the owner means by each nickname / role, so the AI gets smarter about this specific company over time.
+- [ ] **Onboarding flow** — first-time owner interaction: explain "just talk to me, no forms" instead of letting them guess.
+- [ ] **Owner-side closed-loop reporting** — when a task completes, auto-notify any downstream tasks that were waiting + tell the owner what remains globally.
+- [ ] **Per-task silence-threshold override** in UI (right now thresholds are env-wide).
+
+### Longer term
+
 - [ ] Persist conversation history to Postgres or Redis (multi-replica safety)
-- [ ] Slash commands (`/coo new task ...`) for keyboard-driven flows
+- [ ] Slash commands (`/aiptima new task ...`) for keyboard-driven flows
 - [ ] Recurring tasks (`every Monday`, `daily standup`)
-- [ ] Subtasks + dependency graph (block X until Y)
 - [ ] Weekly exec digest DM (auto-generated)
 - [ ] Calendar / Notion / Jira integrations
-- [ ] Workspace-level priority / OKR awareness in the prompt
 - [ ] Per-employee timezone-aware nudges
 - [ ] Audit export of `ProgressUpdate` log
 
+### Deliberately NOT building (early)
+
+Per the product brief's "先别做" list — these are mature-PM-tool features that would push Aiptima toward "yet another Asana with AI" and away from "owner and team don't have to learn project management":
+
+- ❌ Task hierarchies / subtasks / version chains
+- ❌ Full change-audit and history traversal UI
+- ❌ Complex permission systems
+- ❌ Any feature that requires the owner to fill in a roster, org chart, or form before they can use the product
+
 ---
 
-Built as an operations teammate, not a glorified to-do bot. Teach it new playbooks with prompts, give it new tools with functions, and it will execute on the owner's behalf.
+Built as an execution hub, not a glorified to-do bot. The product's job is to amplify owner authority and make sure nothing falls through the cracks — not to make decisions on the owner's behalf.

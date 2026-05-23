@@ -59,9 +59,18 @@ export async function buildHomeView(
     header(translator.t('home.title')),
     context(translator.t('home.hint')),
     divider(),
-    context(buildHeaderSummary(groups, translator)),
-    divider(),
   ];
+
+  // First-time onboarding: if the owner has no tasks yet, show a short walkthrough card
+  // at the top instead of just an empty board. Disappears the moment a task exists.
+  // Per product brief P1: explain "talk to me, no forms" rather than letting them guess.
+  if (tasks.length === 0) {
+    blocks.push(buildOnboardingCard(translator));
+    blocks.push(divider());
+  } else {
+    blocks.push(context(buildHeaderSummary(groups, translator)));
+    blocks.push(divider());
+  }
 
   const renderGroup = (label: string, list: Task[]) => {
     if (list.length === 0) return;
@@ -95,6 +104,28 @@ export async function buildHomeView(
   return {
     type: 'home' as const,
     blocks,
+  };
+}
+
+function buildOnboardingCard(translator: Translator): HomeViewBlock {
+  // Short, no-form onboarding — fulfills the product brief's "make the first minute feel
+  // like 'just talk', not 'enroll your roster'" principle (red line #3 + P1 onboarding).
+  return {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: [
+        `*${translator.t('onboarding.title')}*`,
+        ``,
+        translator.t('onboarding.body'),
+        ``,
+        translator.t('onboarding.example1'),
+        translator.t('onboarding.example2'),
+        translator.t('onboarding.example3'),
+        ``,
+        `_${translator.t('onboarding.footer')}_`,
+      ].join('\n'),
+    },
   };
 }
 

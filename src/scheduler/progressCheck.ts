@@ -6,14 +6,20 @@ import { createLogger } from '../lib/logger';
 import { shouldNudgeTask } from './cadencePolicy';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { conversationStore } from '../orchestrator/conversationStore';
+import { resolveSilencePolicy } from './reminderPolicy';
 
 const log = createLogger('ProgressCheck');
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const NUDGE_CRON = process.env.PROGRESS_NUDGE_CRON || '*/10 * * * *';
-const TIMEOUT_CRON = process.env.PROGRESS_TIMEOUT_CRON || '*/5 * * * *';
+const SILENCE_CRON = process.env.PROGRESS_SILENCE_CRON || '*/5 * * * *';
 const CONVERSATION_TTL_CRON = '0 3 * * *';
 const CONVERSATION_TTL_MS = 7 * 24 * ONE_HOUR_MS;
+
+// Re-alert cooldown so we don't spam the owner about the same silence window.
+const SILENCE_RE_ALERT_COOLDOWN_MS = Number(
+  process.env.SILENCE_RE_ALERT_COOLDOWN_MS ?? `${6 * ONE_HOUR_MS}`
+);
 
 export function startProgressCheckScheduler(_registry: FunctionRegistry) {
   cron.schedule(NUDGE_CRON, async () => {
@@ -67,91 +73,153 @@ export function startProgressCheckScheduler(_registry: FunctionRegistry) {
     }
   });
 
-  cron.schedule(TIMEOUT_CRON, async () => {
+  // Silence surfacing — per product brief §2.5 (the sharpest mechanism in the product).
+  //
+  // RED LINE #1: facts only, never judgment.
+  //   - We do NOT change task status to BLOCKED / FAILED on silence.
+  //   - We do NOT write any owner-facing characterization of the employee.
+  //   - We surface ONE fact-only message to the owner ("X hours since last reply, deadline is Y,
+  //     last known status was Z") and hand the decision back ("want me to nudge, or will you?").
+  //
+  // RED LINE #5: silence reporting is a scalpel, not a hammer. We apply a per-priority
+  // threshold (see reminderPolicy) and a cooldown (SILENCE_RE_ALERT_COOLDOWN_MS) so the
+  // owner is not drowned in "no reply" pings.
+  cron.schedule(SILENCE_CRON, async () => {
     try {
       const now = Date.now();
-      const stale = await prisma.task.findMany({
+      const candidates = await prisma.task.findMany({
         where: {
           completed: false,
-          status: { notIn: ['COMPLETED', 'CANCELLED', 'FAILED', 'PENDING_CLARIFICATION'] },
+          status: { notIn: ['COMPLETED', 'CANCELLED', 'PENDING_CLARIFICATION'] },
           progressPingSentAt: { not: null },
-          progressAutoFailedAt: null,
         },
-        take: 100,
+        take: 200,
       });
 
-      for (const task of stale) {
+      for (const task of candidates) {
         if (!task.progressPingSentAt) continue;
-        const elapsed = now - task.progressPingSentAt.getTime();
-        if (elapsed < ONE_HOUR_MS) continue;
 
-        if (task.lastProgressAt && task.lastProgressAt.getTime() > task.progressPingSentAt.getTime()) {
+        // If the employee already replied since we last pinged, clear the timer and move on.
+        if (
+          task.lastProgressAt &&
+          task.lastProgressAt.getTime() > task.progressPingSentAt.getTime()
+        ) {
           await prisma.task.update({
             where: { id: task.id },
-            data: { progressAutoFailedAt: null, progressPingSentAt: null },
+            data: { progressPingSentAt: null, lastSilenceAlertAt: null },
           });
           continue;
         }
 
+        const silenceMs = now - task.progressPingSentAt.getTime();
+        const policy = resolveSilencePolicy(task.priority);
+        if (silenceMs < policy.surfaceAfterMs) continue;
+
+        // Cooldown: don't re-alert on the same silence window.
+        if (
+          task.lastSilenceAlertAt &&
+          now - task.lastSilenceAlertAt.getTime() < SILENCE_RE_ALERT_COOLDOWN_MS
+        ) {
+          continue;
+        }
+
+        const slackClient = await getClientForTeam(task.teamId, task.enterpriseId);
+        if (!slackClient) {
+          log.warn('No client for silence alert', { taskId: task.id });
+          continue;
+        }
+
+        const ownerId = task.initiator || task.createdBy;
+        if (!ownerId) continue;
+
         try {
+          const dm = await slackClient.conversations.open({ users: ownerId });
+          const dmChannel = (dm as any).channel?.id || ownerId;
+
+          const hoursSilent = Math.floor(silenceMs / ONE_HOUR_MS);
+          const silentText =
+            hoursSilent >= 24
+              ? `${Math.floor(hoursSilent / 24)} day(s)`
+              : hoursSilent >= 1
+                ? `${hoursSilent} hour(s)`
+                : `${Math.floor(silenceMs / (60 * 1000))} min`;
+
+          const dueDelta = task.time.getTime() - now;
+          const dueText =
+            dueDelta > 0
+              ? `due in ${Math.max(1, Math.floor(dueDelta / ONE_HOUR_MS))}h (${task.time.toLocaleString()})`
+              : `was due ${task.time.toLocaleString()}`;
+
+          const lastSync = task.lastProgressSummary
+            ? `"${task.lastProgressSummary}"`
+            : `no prior status on record`;
+
+          // Pure facts. No "concerning", no "slow", no judgment.
+          await slackClient.chat.postMessage({
+            channel: dmChannel,
+            text: `Heads up on "${task.title}" — ${silentText} since I last heard from <@${task.assignee}>.`,
+            blocks: [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: [
+                    `⏳ *${task.title}*`,
+                    `• Assignee: <@${task.assignee}>`,
+                    `• Deadline: ${dueText}`,
+                    `• Silent for: ${silentText} (since my last check-in)`,
+                    `• Last known status: ${lastSync}`,
+                    ``,
+                    `I don't have new info. Want me to nudge them, or would you rather reach out yourself?`,
+                  ].join('\n'),
+                },
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Nudge them for me' },
+                    style: 'primary',
+                    action_id: 'silence_nudge_assignee',
+                    value: task.id,
+                  },
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: `I'll handle it` },
+                    action_id: 'silence_owner_handles',
+                    value: task.id,
+                  },
+                ],
+              },
+            ],
+          });
+
           await prisma.task.update({
             where: { id: task.id },
-            data: {
-              status: 'BLOCKED',
-              notCompletedReason: 'No response within 1 hour of progress check.',
-              notCompletedReasonAt: new Date(),
-              progressAutoFailedAt: new Date(),
-              lastProgressSummary: 'No response within 1 hour of progress check (auto-marked).',
-              lastProgressAt: new Date(),
-            },
+            data: { lastSilenceAlertAt: new Date() },
           });
+
+          // Audit trail — store the fact we surfaced silence, not an interpretation of it.
           await prisma.progressUpdate.create({
             data: {
               taskId: task.id,
-              source: 'auto_timeout',
-              summary: 'No response within 1 hour of progress check (auto-marked BLOCKED).',
-              statusAtTime: 'BLOCKED',
+              source: 'system',
+              summary: `Surfaced silence to owner: ${silentText} since last check-in.`,
+              statusAtTime: task.status,
               progressPercent: task.progressPercent,
             },
           });
 
-          const slackClient = await getClientForTeam(task.teamId, task.enterpriseId);
-          if (!slackClient) {
-            log.warn('No client for timeout notification', { taskId: task.id });
-            continue;
-          }
+          refreshOwnerHome(slackClient, ownerId).catch(() => undefined);
 
-          try {
-            const dm = await slackClient.conversations.open({ users: task.assignee });
-            const dmChannel = (dm as any).channel?.id || task.assignee;
-            await slackClient.chat.postMessage({
-              channel: dmChannel,
-              text: `⏰ Progress check timed out for *${task.title}* (due ${task.time.toLocaleString()}). I have marked it BLOCKED and notified the owner. Reply here when you have an update.`,
-            });
-          } catch (err) {
-            log.warn('Failed to notify assignee on timeout', { taskId: task.id, error: String(err) });
-          }
-
-          const ownerId = task.initiator || task.createdBy;
-          if (ownerId) {
-            try {
-              const dm = await slackClient.conversations.open({ users: ownerId });
-              const dmChannel = (dm as any).channel?.id || ownerId;
-              await slackClient.chat.postMessage({
-                channel: dmChannel,
-                text: `⚠️ *${task.title}* — no response from <@${task.assignee}> within 1 hour. Marked BLOCKED.`,
-              });
-              refreshOwnerHome(slackClient, ownerId).catch(() => undefined);
-            } catch (err) {
-              log.warn('Failed to notify owner on timeout', { taskId: task.id, error: String(err) });
-            }
-          }
+          log.info('Silence surfaced to owner', { taskId: task.id, silenceMs });
         } catch (err) {
-          log.error('Failed to auto-mark BLOCKED', { taskId: task.id, error: String(err) });
+          log.error('Failed to surface silence', { taskId: task.id, error: String(err) });
         }
       }
     } catch (err) {
-      log.error('Timeout scheduler tick failed', { error: String(err) });
+      log.error('Silence scheduler tick failed', { error: String(err) });
     }
   });
 
@@ -162,6 +230,6 @@ export function startProgressCheckScheduler(_registry: FunctionRegistry) {
 
   log.info('Progress scheduler started', {
     nudgeCron: NUDGE_CRON,
-    timeoutCron: TIMEOUT_CRON,
+    silenceCron: SILENCE_CRON,
   });
 }

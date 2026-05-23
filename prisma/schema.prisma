@@ -59,6 +59,11 @@ model Task {
   progressPingSentAt     DateTime?
   progressAutoFailedAt   DateTime?
 
+  /// Last time we surfaced silence (no employee reply) to the owner. Prevents repeat alerts
+  /// for the same silence window. Does NOT change task status — silence is a fact for the
+  /// owner to act on, not a judgment AI makes (see product brief §2.5 / red line #1).
+  lastSilenceAlertAt     DateTime?
+
   createdAt              DateTime     @default(now())
   updatedAt              DateTime     @updatedAt
 
@@ -98,6 +103,61 @@ model ProgressUpdate {
   createdAt       DateTime    @default(now())
 
   @@index([taskId, createdAt])
+}
+
+/// Organizational memory: what the owner means by each nickname/role in *this* workspace.
+///
+/// This is the moat. Anyone can build a Slack bot that parses intent; only running in one
+/// company for months produces "the owner's '小王' means U03XYZ" — and changing tools means
+/// retraining all of that. See product brief §1.4 and §4.
+///
+/// Sources (`source`):
+///   - "owner_confirmed"   — owner explicitly confirmed (highest trust)
+///   - "owner_inferred"    — derived from how the owner referred to a Slack mention in conversation
+///   - "slack_profile"     — derived from Slack profile fields (display_name, real_name, title)
+///   - "channel_membership"— derived from being in #design etc.
+///
+/// We never block the owner to "enroll" people — these rows accumulate passively from
+/// natural conversation (red line #3).
+model PersonAlias {
+  id              String   @id @default(cuid())
+
+  teamId          String?
+  enterpriseId    String?
+
+  /// The string the owner used: "小王", "Lisa", "design", "the marketing guy".
+  /// Stored case-normalized (lower). Matched against incoming references.
+  alias           String
+
+  /// The Slack user ID this alias resolves to.
+  slackUserId     String
+
+  /// What kind of reference this alias represents — useful for future role-based routing
+  /// ("the owner said 'design', and we know Lisa + Tom are on design").
+  ///   - "person"   — alias points at one specific human
+  ///   - "role"     — alias represents a role/team (may have multiple slackUserIds via separate rows)
+  kind            String   @default("person")
+
+  /// How we learned this mapping. See enum-doc above.
+  source          String
+
+  /// 0–100. owner_confirmed=100, slack_profile=70, channel_membership=50, owner_inferred=80.
+  /// Low-confidence aliases should be re-confirmed once before being relied on silently.
+  confidence      Int      @default(50)
+
+  /// How many times this mapping has been used without correction. Cheap signal for trust.
+  hitCount        Int      @default(0)
+
+  /// Last time this mapping was used or refreshed. Useful for stale-pruning.
+  lastUsedAt      DateTime @default(now())
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Same alias can map to different people in different teams. Unique within a team.
+  @@unique([teamId, enterpriseId, alias, slackUserId])
+  @@index([teamId, enterpriseId, alias])
+  @@index([teamId, enterpriseId, slackUserId])
 }
 
 /// One row per Slack workspace install. Holds the bot token Bolt needs to act on behalf of that workspace.
