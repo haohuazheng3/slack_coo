@@ -3,7 +3,7 @@ import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { ParsedTaskInput, normalizeToDBTask } from '../services/normalizeTask';
 import { extractUserId, toSlackMention } from '../utils/assignee';
 import { prisma } from '../lib/prisma';
-import { openDm } from '../lib/sendHelpers';
+import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { createLogger } from '../lib/logger';
 import { resolveAssignee, ResolvedCandidate } from '../services/nicknameResolver';
@@ -268,7 +268,7 @@ export function createTaskFunction(): RegisteredFunction {
                 .filter(Boolean)
                 .join('\n');
 
-        await context.slack.client.chat.postMessage({
+        await postMessageWithFeedback(context.slack.client, {
           channel: assigneeDm,
           text: dmLocale === 'zh' ? `新任务:${created.title}` : `New task: ${created.title}`,
           mrkdwn: true,

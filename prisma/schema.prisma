@@ -160,6 +160,64 @@ model PersonAlias {
   @@index([teamId, enterpriseId, slackUserId])
 }
 
+/// One row per user-submitted feedback report (the 🐞 button below bot replies).
+///
+/// The whole point of this table is to make "the AI did something weird here"
+/// debuggable WITHOUT the user having to screenshot, scroll up to find context,
+/// and paste it into chat. When the user clicks the bug button under a bot reply
+/// and types a short description, we snapshot:
+///   - the conversation history at that point (from the in-memory conversationStore)
+///   - the relevant task state from Postgres
+///   - metadata about what triggered the reply (mention / DM / ambient / cron)
+/// All packaged in one row. The admin view at `/feedback` then renders this as
+/// markdown so the developer can paste a single block into Claude for diagnosis.
+model FeedbackReport {
+  id               String   @id @default(cuid())
+
+  teamId           String?
+  enterpriseId     String?
+
+  /// Slack user id of whoever clicked the button. Cached display name so the
+  /// admin view doesn't have to round-trip to Slack.
+  reporterId       String
+  reporterName    String?
+
+  /// Where the bot reply was that triggered this report — channel + message ts.
+  /// triggerText is the literal text we captured from body.message at click time
+  /// (so even if conversationStore was lost across a restart we still know what
+  /// the user was reacting to).
+  triggerChannelId String
+  triggerMessageTs String?
+  triggerThreadTs  String?
+  triggerText      String?
+
+  /// User's free-form description of what went wrong.
+  description      String
+
+  /// JSON snapshots captured at submit time. These are intentionally untyped
+  /// (Json) because the shape will evolve as we add fields to debug-relevant
+  /// state — keeping them schema-less avoids a Prisma migration every time we
+  /// want to capture one more field. The admin view + markdown formatter both
+  /// shape-tolerate.
+  conversationSnapshot Json
+  taskSnapshot         Json
+  metadata             Json?
+
+  /// Lifecycle:
+  ///   new        — just submitted
+  ///   triaged    — admin has reviewed, may or may not act
+  ///   resolved   — fix shipped (admin manually marks)
+  ///   dismissed  — not a bug / out of scope
+  status           String   @default("new")
+  triageNotes      String?
+
+  createdAt        DateTime @default(now())
+  triagedAt        DateTime?
+
+  @@index([teamId, enterpriseId])
+  @@index([status, createdAt])
+}
+
 /// One row per Slack workspace install. Holds the bot token Bolt needs to act on behalf of that workspace.
 /// Either teamId or enterpriseId is non-null (or both for Enterprise Grid orgs).
 model SlackInstallation {

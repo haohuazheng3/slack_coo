@@ -1,6 +1,6 @@
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { toSlackMention } from '../utils/assignee';
-import { openDm } from '../lib/sendHelpers';
+import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 import { conversationStore } from '../orchestrator/conversationStore';
 import { createLogger } from '../lib/logger';
 import { detectLanguageFromTexts } from '../lib/i18n';
@@ -74,7 +74,7 @@ export function nudgeProgressFunction(): RegisteredFunction {
         args.customMessage?.trim() ||
         `How's it going? A one-liner is plenty — "on track" / "halfway" / "blocked on X" works. I'll handle the translation for ${ownerMention}.`;
 
-      await slack.client.chat.postMessage({
+      await postMessageWithFeedback(slack.client, {
         channel: dmChannel,
         text: `${header}: ${task.title}`,
         blocks: [

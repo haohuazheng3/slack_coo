@@ -7,7 +7,7 @@ import { createLogger } from '../lib/logger';
 import { judgeTasks, OpsDecision } from '../orchestrator/opsJudge';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { conversationStore } from '../orchestrator/conversationStore';
-import { openDm } from '../lib/sendHelpers';
+import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 
 const log = createLogger('ProgressCheck');
 
@@ -132,7 +132,7 @@ async function dmAssignee(decision: OpsDecision, task: Task, slackClient: any) {
   // We render only structure here — text comes from the LLM in the workspace language.
   // The buttons are functional widgets; their action_ids are matched server-side, so
   // their labels can stay short and emoji-led to be roughly language-neutral.
-  await slackClient.chat.postMessage({
+  await postMessageWithFeedback(slackClient, {
     channel: dmChannel,
     text: headline,
     blocks: [
@@ -198,7 +198,7 @@ async function dmOwnerAboutSilence(decision: OpsDecision, task: Task, slackClien
 
   const { headline, body } = decision.message!;
 
-  await slackClient.chat.postMessage({
+  await postMessageWithFeedback(slackClient, {
     channel: dm,
     text: headline,
     blocks: [

@@ -2,6 +2,7 @@ import { PrismaClient, Task } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
 import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 import { signDashboardToken } from '../dashboard/auth';
+import { getInstallerUserId } from '../installation/installationStore';
 
 type HomeViewBlock = {
   type: string;
@@ -96,18 +97,35 @@ export async function buildHomeView(
   if (baseUrl && teamId) {
     const token = signDashboardToken({ userId: ownerId, teamId, enterpriseId });
     const dashboardUrl = `${baseUrl}/dashboard?token=${encodeURIComponent(token)}`;
-    blocks.push({
-      type: 'actions',
-      elements: [
-        {
+    const actionElements: any[] = [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: translator.t('home.openInBrowser') },
+        style: 'primary',
+        url: dashboardUrl,
+        action_id: 'open_dashboard',
+      },
+    ];
+
+    // Admin-only: show a "Feedback admin" button to the workspace installer.
+    // Token is the same signed dashboard token; the /feedback route additionally
+    // checks the viewer is the installer before showing anything.
+    try {
+      const installer = await getInstallerUserId(teamId, enterpriseId);
+      if (installer && installer === ownerId) {
+        const feedbackUrl = `${baseUrl}/feedback?token=${encodeURIComponent(token)}`;
+        actionElements.push({
           type: 'button',
-          text: { type: 'plain_text', text: translator.t('home.openInBrowser') },
-          style: 'primary',
-          url: dashboardUrl,
-          action_id: 'open_dashboard',
-        },
-      ],
-    });
+          text: { type: 'plain_text', text: '🐞 Feedback (admin)' },
+          url: feedbackUrl,
+          action_id: 'open_feedback_admin',
+        });
+      }
+    } catch {
+      // Best-effort — if the lookup fails, just skip the admin button.
+    }
+
+    blocks.push({ type: 'actions', elements: actionElements });
     blocks.push(context(translator.t('home.openInBrowserHint')));
   }
 

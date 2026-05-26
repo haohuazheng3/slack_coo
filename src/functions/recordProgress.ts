@@ -2,7 +2,7 @@ import { TaskStatus } from '@prisma/client';
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { interpretEmployeeProgress } from '../services/aiSummarizer';
 import { toSlackMention } from '../utils/assignee';
-import { openDm } from '../lib/sendHelpers';
+import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { createLogger } from '../lib/logger';
 import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
@@ -149,7 +149,7 @@ export function recordProgressFunction(): RegisteredFunction {
             Boolean
           ) as string[];
 
-          await slack.client.chat.postMessage({
+          await postMessageWithFeedback(slack.client, {
             channel: ownerDm,
             text: headline,
             mrkdwn: true,

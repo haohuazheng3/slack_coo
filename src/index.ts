@@ -35,6 +35,9 @@ import { verifyDashboardToken } from './dashboard/auth';
 import { buildDashboardSnapshot } from './dashboard/data';
 import { renderDashboard, renderExpiredOrInvalid, LANG_SWITCH_PLACEHOLDER } from './dashboard/pages';
 
+import { registerFeedbackHandlers } from './feedback/handlers';
+import { renderFeedbackAdmin, renderFeedbackEmpty } from './feedback/pages';
+
 dotenv.config();
 
 const log = createLogger('App');
@@ -68,6 +71,11 @@ const BOT_SCOPES = [
   'im:read',
   'im:write',
   'users:read',
+  // `commands` powers the optional /feedback slash command. The 🐞 button under
+  // every bot reply is the primary entry point and works without this scope;
+  // /feedback is just a convenience for "general feedback not tied to a
+  // specific reply". Existing workspaces don't have to reinstall just for this.
+  'commands',
 ];
 
 const PORT = Number(process.env.PORT) || 3030;
@@ -109,6 +117,7 @@ const functionRegistry = new FunctionRegistry();
 registerCoreFunctions(functionRegistry);
 
 registerActions(app, functionRegistry);
+registerFeedbackHandlers(app);
 
 receiver.router.get('/healthz', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
@@ -178,6 +187,51 @@ receiver.router.get('/dashboard', async (req, res) => {
   } catch (err) {
     log.error('Dashboard render failed', { error: String(err), uid });
     sendHtml(res, renderExpiredOrInvalid(langOverride ?? 'en'), 500);
+  }
+});
+
+// Admin feedback view — same signed-token mechanism as the dashboard, but
+// gated additionally on "viewer is the workspace installer". Anyone else
+// who somehow obtains a valid token still can't see reports for a workspace
+// they didn't install.
+receiver.router.get('/feedback', async (req, res) => {
+  const token = (req.query?.token ?? '').toString();
+  const verified = verifyDashboardToken(token);
+  if (!verified.ok) {
+    sendHtml(res, renderFeedbackEmpty('Link expired or invalid. Re-open from the Slack Home tab.'), 401);
+    return;
+  }
+  const { uid, tid, eid } = verified.payload;
+
+  try {
+    const installer = await getInstallerUserId(tid, eid);
+    if (!installer || uid !== installer) {
+      sendHtml(
+        res,
+        renderFeedbackEmpty('This page is only available to the workspace installer (admin).'),
+        403
+      );
+      return;
+    }
+
+    const reports = await prisma.feedbackReport.findMany({
+      where: { teamId: tid, enterpriseId: eid },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+
+    sendHtml(
+      res,
+      renderFeedbackAdmin({
+        reports,
+        workspaceName: tid,
+        baseUrl: BASE_URL,
+        showActions: true,
+      })
+    );
+  } catch (err) {
+    log.error('Feedback page render failed', { error: String(err) });
+    sendHtml(res, renderFeedbackEmpty('Something broke while loading reports.'), 500);
   }
 });
 
