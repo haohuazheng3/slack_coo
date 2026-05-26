@@ -1,5 +1,6 @@
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { toSlackMention } from '../utils/assignee';
+import { detectLanguageFromTexts } from '../lib/i18n';
 
 type AskClarificationArgs = {
 
@@ -10,12 +11,34 @@ type AskClarificationArgs = {
   draftSummary?: string;
 };
 
-const FIELD_LABEL: Record<string, string> = {
-  assignee: '负责人 / Assignee',
-  dueTime: '截止时间 / Due time',
-  title: '任务标题 / Title',
-  description: '任务描述 / Description',
-  priority: '优先级 / Priority',
+const FIELD_LABEL: Record<'en' | 'zh', Record<string, string>> = {
+  en: {
+    assignee: 'Assignee',
+    dueTime: 'Due time',
+    title: 'Task title',
+    description: 'Description',
+    priority: 'Priority',
+  },
+  zh: {
+    assignee: '负责人',
+    dueTime: '截止时间',
+    title: '任务标题',
+    description: '任务描述',
+    priority: '优先级',
+  },
+};
+
+const COPY = {
+  en: {
+    needInfo: 'I need a bit more info before I create this task:',
+    draft: 'Draft so far',
+    missing: 'Missing',
+  },
+  zh: {
+    needInfo: '建任务前还需要你补一下:',
+    draft: '目前的草稿',
+    missing: '缺少',
+  },
 };
 
 export function askClarificationFunction(): RegisteredFunction {
@@ -43,12 +66,20 @@ export function askClarificationFunction(): RegisteredFunction {
             .filter((f) => f.length > 0)
         : [];
 
+      // Language follows the question itself + any draft context. If the AI is
+      // asking in Chinese, the prefix/labels need to be Chinese — anything else
+      // breaks the "no mixed languages" rule and shows up as the kind of jarring
+      // half-translated UI we've been actively tearing out.
+      const lang = detectLanguageFromTexts([question, args.draftSummary ?? null]);
+      const copy = COPY[lang];
+      const fieldLabels = FIELD_LABEL[lang];
+
       const blocks: any[] = [
         {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `${ownerMention} ❓ *I need a bit more info before I create this task:*\n${question}`,
+            text: `${ownerMention} ❓ *${copy.needInfo}*\n${question}`,
           },
         },
       ];
@@ -56,24 +87,24 @@ export function askClarificationFunction(): RegisteredFunction {
       if (args.draftSummary) {
         blocks.push({
           type: 'context',
-          elements: [{ type: 'mrkdwn', text: `📝 Draft so far: _${args.draftSummary.trim()}_` }],
+          elements: [{ type: 'mrkdwn', text: `📝 ${copy.draft}: _${args.draftSummary.trim()}_` }],
         });
       }
 
       if (missingFields.length > 0) {
         const formatted = missingFields
-          .map((f) => `• ${FIELD_LABEL[f] ?? f}`)
+          .map((f) => `• ${fieldLabels[f] ?? f}`)
           .join('\n');
         blocks.push({
           type: 'context',
-          elements: [{ type: 'mrkdwn', text: `Missing:\n${formatted}` }],
+          elements: [{ type: 'mrkdwn', text: `${copy.missing}:\n${formatted}` }],
         });
       }
 
-      await context.slack.send({
-        text: `Need clarification: ${question}`,
-        blocks,
-      });
+      // The top-level `text` is fallback / notification text — Slack uses it for
+      // mobile previews. Keep it in the question's language too.
+      const fallbackText = lang === 'zh' ? `需要补充: ${question}` : `Need clarification: ${question}`;
+      await context.slack.send({ text: fallbackText, blocks });
 
       return {
         status: 'success',

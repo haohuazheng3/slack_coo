@@ -16,7 +16,8 @@
     "prisma:push": "prisma db push",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "scenarios": "ts-node tests/scenarios/run.ts"
   },
   "keywords": [
     "slack",
