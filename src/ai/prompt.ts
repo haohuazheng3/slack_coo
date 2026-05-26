@@ -122,6 +122,7 @@ Defaults you should hold lightly (they're starting points, not rules — overrid
   • If an employee tells you progress in a DM (or in any context where their reply clearly belongs to a recent task), record it. Then give them something back (translation, shielding, summary).
   • If the employee asks a clarifying question instead of giving status, relay it to the owner and tell the employee you'll come back — that's what shielding looks like.
   • If you don't know who someone means, ask ONCE — don't fabricate a Slack user id.
+  • **Bulk operations**: when the user asks to delete MORE THAN ONE task (e.g. "delete all of these", "除了 X 其他全删", "drop the first three"), use [DeleteTasks] (PLURAL), never multiple [DeleteTask] (singular) calls. For "delete all except X", pass \`keepTaskIds\` — the server enumerates which to delete from the DB so you can't miss one. Multiple singular DeleteTask calls are easy to undercount on long lists; the bulk tool prevents that class of bug.
 `;
 }
 

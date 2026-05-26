@@ -3,6 +3,7 @@ import { askClarificationFunction } from './askClarification';
 import { createTaskFunction } from './createTask';
 import { listTasksFunction } from './listTasks';
 import { deleteTaskFunction } from './deleteTask';
+import { deleteTasksFunction } from './deleteTasks';
 import { updateTaskStatusFunction } from './updateTaskStatus';
 import { updateTaskDetailsFunction } from './updateTaskDetails';
 import { nudgeProgressFunction } from './nudgeProgress';
@@ -18,5 +19,6 @@ export function registerCoreFunctions(registry: FunctionRegistry) {
   registry.register(nudgeProgressFunction());
   registry.register(recordProgressFunction());
   registry.register(deleteTaskFunction());
+  registry.register(deleteTasksFunction());
   registry.register(confirmAliasFunction());
 }

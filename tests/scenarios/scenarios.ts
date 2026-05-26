@@ -828,6 +828,113 @@ export async function scenarioAmbientGateRealTest(): Promise<ScenarioResult> {
   );
 }
 
+// ─────────── scenario 11: bulk delete "all except X" must not miss any ───────────
+
+export async function scenarioBulkDeleteAllExcept(): Promise<ScenarioResult> {
+  return runOne(
+    'bulk_delete_all_except',
+    '老板的 task list 里有 6 个任务,说"除了网站那一个其他全删除"。期望:删 5 个,留 1 个,绝不少删。直接复现 user 反馈里"显示出来多了一个"那个 bug。',
+    async (a) => {
+      const ctx = await setupScenario({
+        name: 'bulk_delete',
+        owner: {
+          id: 'U03OWNERHZ',
+          tz: 'America/Detroit',
+          tz_label: 'EST',
+          display_name: 'Haohua',
+        },
+        otherUsers: [
+          { id: 'U03YANG001', tz: 'America/Detroit', tz_label: 'EST', display_name: 'Yang' },
+        ],
+      });
+
+      try {
+        // Seed exactly the 6-task scene from the bug report. Five "noise"
+        // tasks plus one to keep ("完成网站开发"). Mix of language and titles
+        // so the LLM doesn't trivially cluster them.
+        const { prisma } = await import('../../src/lib/prisma');
+        const now = Date.now();
+        const seedTasks = [
+          { title: 'Reminder: Eat', priority: 'HIGH' as const, dueOffsetMs: -11 * 24 * 60 * 60 * 1000, description: 'Set a reminder to eat.' },
+          { title: 'Eat', priority: 'NORMAL' as const, dueOffsetMs: -60 * 60 * 1000 },
+          { title: 'Eat', priority: 'NORMAL' as const, dueOffsetMs: -60 * 60 * 1000 },
+          { title: 'Program test - confirm receipt', priority: 'NORMAL' as const, dueOffsetMs: 16 * 60 * 60 * 1000 },
+          { title: '确认邮件提醒 / Confirm email reminder', priority: 'NORMAL' as const, dueOffsetMs: 16 * 60 * 60 * 1000 },
+          { title: '完成网站开发', priority: 'NORMAL' as const, dueOffsetMs: 36 * 60 * 60 * 1000, assignee: 'U03YANG001' },
+        ];
+        const created: { id: string; title: string }[] = [];
+        for (const t of seedTasks) {
+          const row = await prisma.task.create({
+            data: {
+              title: t.title,
+              description: t.description ?? null,
+              time: new Date(now + t.dueOffsetMs),
+              assignee: t.assignee ?? ctx.ownerId,
+              assignees: [t.assignee ?? ctx.ownerId],
+              channelId: 'C_GENERAL',
+              createdBy: ctx.ownerId,
+              initiator: ctx.ownerId,
+              teamId: ctx.teamId,
+              enterpriseId: ctx.enterpriseId,
+              status: 'NOT_STARTED',
+              priority: t.priority,
+              progressPercent: 0,
+            },
+          });
+          created.push({ id: row.id, title: row.title });
+        }
+
+        const websiteTask = created.find((c) => c.title === '完成网站开发')!;
+
+        // First turn: show the list (so the AI has the IDs in working context)
+        await talk(ctx, {
+          actor: ctx.ownerId,
+          channelId: 'C_GENERAL',
+          text: '我看看任务信息',
+        });
+
+        // Second turn: the bug-reproducing instruction.
+        await talk(ctx, {
+          actor: ctx.ownerId,
+          channelId: 'C_GENERAL',
+          text: '除了"完成网站开发"那一个,其他全删除掉',
+        });
+
+        const surviving = await dbTasks(ctx);
+        a.ok(
+          surviving.length === 1,
+          `Exactly 1 task remains (got ${surviving.length})`,
+          `Expected 1 task remaining, got ${surviving.length}: ${surviving.map((t) => t.title).join(' | ')}`
+        );
+        a.ok(
+          surviving.length === 1 && surviving[0].id === websiteTask.id,
+          `The surviving task is the website task`,
+          `Surviving task is not the website: "${surviving[0]?.title}"`
+        );
+
+        // Check the deletion confirmation surfaced the correct count.
+        const allText = joinAll(ctx.captured);
+        const fiveMentioned =
+          /5\s*(个|task)/i.test(allText) || /五/i.test(allText) || /Deleted 5/.test(allText);
+        a.warn(
+          fiveMentioned,
+          `Confirmation message should mention "5" deletions (warning if missing — UX nicety, not a hard requirement)`
+        );
+
+        // Hard fail if any "Eat" or other non-website task survived.
+        const survivingTitles = surviving.map((t) => t.title);
+        a.ok(
+          !survivingTitles.some((t) => t === 'Eat' || t === 'Reminder: Eat'),
+          `No "Eat" task survived the bulk delete`,
+          `An Eat task survived: ${survivingTitles.join(' | ')} — this is the exact reported bug`
+        );
+      } finally {
+        await teardownScenario(ctx);
+      }
+    }
+  );
+}
+
 // ─────────── registry ───────────
 
 export const ALL_SCENARIOS = [
@@ -841,4 +948,5 @@ export const ALL_SCENARIOS = [
   scenarioDisambiguation,
   scenarioOpsJudgeSilenceZh,
   scenarioAmbientGateRealTest,
+  scenarioBulkDeleteAllExcept,
 ];
