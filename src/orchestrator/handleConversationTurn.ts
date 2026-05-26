@@ -47,8 +47,17 @@ export async function handleConversationTurn(input: ConversationTurnInput): Prom
   } = input;
 
   const conversationKey = getConversationKey(channelId, threadTs, fallbackTs);
-  const sendThreadTs = threadTs ?? fallbackTs;
   const isDirectMessage = channelId.startsWith('D');
+
+  // Threading behavior — matches how human-readable Slack DMs vs channels work:
+  //   • Channel message (no thread)  → reply lives in a NEW thread under the
+  //     user's message. Keeps the channel from getting noisy.
+  //   • Channel message (in thread)  → reply continues that thread.
+  //   • DM top-level                 → reply FLAT (no thread). Matches every
+  //     mainstream AI assistant in DMs; threading inside a DM is hostile to
+  //     mobile readers and makes the conversation feel mechanical.
+  //   • DM where user explicitly opened a thread → respect that thread.
+  const sendThreadTs = threadTs ?? (isDirectMessage ? undefined : fallbackTs);
 
   const send = buildChannelSender(client, channelId, sendThreadTs);
 
