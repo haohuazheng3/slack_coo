@@ -190,10 +190,11 @@ receiver.router.get('/dashboard', async (req, res) => {
   }
 });
 
-// Admin feedback view — same signed-token mechanism as the dashboard, but
-// gated additionally on "viewer is the workspace installer". Anyone else
-// who somehow obtains a valid token still can't see reports for a workspace
-// they didn't install.
+// Feedback view — open to every member of the workspace during internal beta.
+// Signed token still required (so random internet visitors can't see anything),
+// but no extra "you must be the installer" gate. If we ever go past beta we'll
+// likely want to gate this back down — for now everyone with a valid token can
+// see every report for their workspace.
 receiver.router.get('/feedback', async (req, res) => {
   const token = (req.query?.token ?? '').toString();
   const verified = verifyDashboardToken(token);
@@ -201,19 +202,9 @@ receiver.router.get('/feedback', async (req, res) => {
     sendHtml(res, renderFeedbackEmpty('Link expired or invalid. Re-open from the Slack Home tab.'), 401);
     return;
   }
-  const { uid, tid, eid } = verified.payload;
+  const { tid, eid } = verified.payload;
 
   try {
-    const installer = await getInstallerUserId(tid, eid);
-    if (!installer || uid !== installer) {
-      sendHtml(
-        res,
-        renderFeedbackEmpty('This page is only available to the workspace installer (admin).'),
-        403
-      );
-      return;
-    }
-
     const reports = await prisma.feedbackReport.findMany({
       where: { teamId: tid, enterpriseId: eid },
       orderBy: { createdAt: 'desc' },

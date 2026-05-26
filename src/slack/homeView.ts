@@ -2,7 +2,6 @@ import { PrismaClient, Task } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
 import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 import { signDashboardToken } from '../dashboard/auth';
-import { getInstallerUserId } from '../installation/installationStore';
 
 type HomeViewBlock = {
   type: string;
@@ -107,23 +106,15 @@ export async function buildHomeView(
       },
     ];
 
-    // Admin-only: show a "Feedback admin" button to the workspace installer.
-    // Token is the same signed dashboard token; the /feedback route additionally
-    // checks the viewer is the installer before showing anything.
-    try {
-      const installer = await getInstallerUserId(teamId, enterpriseId);
-      if (installer && installer === ownerId) {
-        const feedbackUrl = `${baseUrl}/feedback?token=${encodeURIComponent(token)}`;
-        actionElements.push({
-          type: 'button',
-          text: { type: 'plain_text', text: '🐞 Feedback (admin)' },
-          url: feedbackUrl,
-          action_id: 'open_feedback_admin',
-        });
-      }
-    } catch {
-      // Best-effort — if the lookup fails, just skip the admin button.
-    }
+    // Beta: feedback view is open to anyone in the workspace (signed-token
+    // gated, but no installer-only check). Every Home tab gets the 🐞 button.
+    const feedbackUrl = `${baseUrl}/feedback?token=${encodeURIComponent(token)}`;
+    actionElements.push({
+      type: 'button',
+      text: { type: 'plain_text', text: '🐞 Feedback' },
+      url: feedbackUrl,
+      action_id: 'open_feedback',
+    });
 
     blocks.push({ type: 'actions', elements: actionElements });
     blocks.push(context(translator.t('home.openInBrowserHint')));
