@@ -1,6 +1,7 @@
 import type { Task, TaskStatus } from '@prisma/client';
 import { detectLanguageFromTexts } from '../lib/i18n';
 import { toSlackMention } from '../utils/assignee';
+import { formatDateTime } from '../lib/timezone';
 import { DashboardSnapshot } from './data';
 
 type Lang = 'en' | 'zh';
@@ -610,8 +611,9 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function renderTaskCard(task: Task, now: Date, c: DashCopy): string {
+function renderTaskCard(task: Task, now: Date, c: DashCopy, viewerTz: string, lang: Lang): string {
   const deadline = formatDeadline(task.time, now, c);
+  const dueAbs = formatDateTime(task.time, { tz: viewerTz, locale: lang });
   const tone = STATUS_TONE[task.status];
   const pct = Math.max(0, Math.min(100, task.progressPercent));
   const fillClass = tone === 'blocked' ? 'blocked' : tone === 'done' ? 'done' : '';
@@ -641,7 +643,7 @@ function renderTaskCard(task: Task, now: Date, c: DashCopy): string {
     </div>
     <div class="meta">
       <div class="item"><strong>${escapeHtml(c.card.assignee)}:</strong> ${escapeHtml(toSlackMention(task.assignee))}</div>
-      <div class="item"><strong>${escapeHtml(c.card.due)}:</strong> ${escapeHtml(task.time.toLocaleString())} <span class="${deadline.isOverdue ? 'overdue-tag' : ''}">${deadline.isOverdue ? escapeHtml(c.card.overdueTag) + ' · ' : ''}${escapeHtml(deadline.text)}</span></div>
+      <div class="item"><strong>${escapeHtml(c.card.due)}:</strong> ${escapeHtml(dueAbs)} <span class="${deadline.isOverdue ? 'overdue-tag' : ''}">${deadline.isOverdue ? escapeHtml(c.card.overdueTag) + ' · ' : ''}${escapeHtml(deadline.text)}</span></div>
     </div>
     <div class="progress-row">
       <div class="progress-bar"><div class="fill ${fillClass}" style="width: ${pct}%"></div></div>
@@ -732,11 +734,14 @@ export function renderDashboard(args: {
   snapshot: DashboardSnapshot;
   langOverride?: string | null;
   slackDeepLink: string;
+  /** IANA tz of the viewer. Used to format all deadlines so they read in local time. */
+  viewerTz?: string | null;
 }): string {
   const lang = pickLang(args.snapshot, args.langOverride);
   const c = COPY[lang];
   const now = new Date();
   const s = args.snapshot;
+  const viewerTz = args.viewerTz || process.env.DEFAULT_TIMEZONE || 'America/New_York';
 
   const otherLangUrl = `?token={KEEP}&lang=${lang === 'en' ? 'zh' : 'en'}`;
 
@@ -788,7 +793,7 @@ export function renderDashboard(args: {
     <section class="block">
       <h2>${escapeHtml(c.sections.risks)}</h2>
       <p class="lead">${escapeHtml(c.sections.risksLead)}</p>
-      ${s.riskTasks.map((t) => renderTaskCard(t, now, c)).join('')}
+      ${s.riskTasks.map((t) => renderTaskCard(t, now, c, viewerTz, lang)).join('')}
     </section>`
         : ''
     }
@@ -801,7 +806,7 @@ export function renderDashboard(args: {
           ${
             s.activeTasks.length === 0
               ? `<div class="empty">${escapeHtml(c.sections.empty)}</div>`
-              : s.activeTasks.map((t) => renderTaskCard(t, now, c)).join('')
+              : s.activeTasks.map((t) => renderTaskCard(t, now, c, viewerTz, lang)).join('')
           }
         </section>
 

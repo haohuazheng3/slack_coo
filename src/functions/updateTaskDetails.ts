@@ -2,11 +2,10 @@ import { TaskPriority } from '@prisma/client';
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { parseRelativeTimeToDate } from '../services/normalizeTask';
 import { toSlackMention } from '../utils/assignee';
-import {
-  syncChannelTaskCard,
-  persistChannelMessageTs,
-  refreshOwnerHome,
-} from '../slack/taskCardUpdater';
+import { refreshOwnerHome } from '../slack/taskCardUpdater';
+import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
+import { formatDateTime } from '../lib/timezone';
+import { getUserProfile } from '../lib/userProfile';
 
 type UpdateTaskDetailsArgs = {
   taskId: string;
@@ -156,31 +155,35 @@ export function updateTaskDetailsFunction(): RegisteredFunction {
 
       const updated = await prisma.task.update({ where: { id: taskId }, data: updates });
 
-      const ts = await syncChannelTaskCard(slack.client, updated);
-      if (ts && ts !== updated.channelMessageTs) {
-        await persistChannelMessageTs(updated.id, ts);
-      }
+      // No channel card sync — cards were dropped. The orchestrator's natural
+      // reply ("好的,把 deadline 改到周二 18:00 了") is the user-visible side.
+      // This handler still produces a short confirmation line for surfaces
+      // that don't go through the orchestrator (button clicks, etc.).
       const ownerId = updated.initiator || updated.createdBy;
-      if (ownerId) refreshOwnerHome(slack.client, ownerId).catch(() => undefined);
+      if (ownerId) {
+        refreshOwnerHome(slack.client, ownerId, {
+          teamId: slack.teamId ?? null,
+          enterpriseId: slack.enterpriseId ?? null,
+        }).catch(() => undefined);
+      }
 
-      await slack.send({
-        text: `✏️ Task updated: ${updated.title}`,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: [
-                '✏️ *Task updated*',
-                `*${updated.title}*`,
-                `*Assignee:* ${toSlackMention(updated.assignee)}`,
-                `*Due:* ${updated.time.toLocaleString()}`,
-                `*Priority:* ${updated.priority}`,
-              ].join('\n'),
-            },
-          },
-        ],
+      // Localized one-line confirmation. The viewer's TZ is used for the due
+      // date — the speaker is the owner, so it's their local time.
+      const lang = detectLanguageFromTexts([updated.title, updated.description, updated.lastProgressSummary]);
+      const translator = getTranslator(lang);
+      const viewerProfile = await getUserProfile(slack.client, slack.userId, {
+        teamId: slack.teamId ?? null,
+        enterpriseId: slack.enterpriseId ?? null,
       });
+      const viewerTz = viewerProfile?.tz ?? process.env.DEFAULT_TIMEZONE;
+      const dueLocal = formatDateTime(updated.time, { tz: viewerTz, locale: lang });
+
+      const confirmation =
+        lang === 'zh'
+          ? `✏️ 已更新《${updated.title}》— 负责人 ${toSlackMention(updated.assignee)}, 截止 ${dueLocal}, 优先级 ${translator.priorityBadge(updated.priority)}。`
+          : `✏️ Updated "${updated.title}" — Assignee ${toSlackMention(updated.assignee)}, due ${dueLocal}, ${translator.priorityBadge(updated.priority)}.`;
+
+      await slack.send(confirmation);
 
       return {
         status: 'success',

@@ -3,6 +3,9 @@ import { toSlackMention } from '../utils/assignee';
 import { openDm } from '../lib/sendHelpers';
 import { conversationStore } from '../orchestrator/conversationStore';
 import { createLogger } from '../lib/logger';
+import { detectLanguageFromTexts } from '../lib/i18n';
+import { formatDateTime } from '../lib/timezone';
+import { getUserProfile } from '../lib/userProfile';
 
 const log = createLogger('NudgeProgress');
 
@@ -43,7 +46,17 @@ export function nudgeProgressFunction(): RegisteredFunction {
         return { status: 'error', message: 'Could not open a DM with the assignee.' };
       }
 
-      const dueText = task.time.toLocaleString();
+      // Display the deadline in the ASSIGNEE's local timezone — they're the one
+      // about to read this DM. Locale follows the task content language.
+      const assigneeProfile = await getUserProfile(slack.client, task.assignee, {
+        teamId: slack.teamId ?? null,
+        enterpriseId: slack.enterpriseId ?? null,
+      });
+      const lang = detectLanguageFromTexts([task.title, task.description, task.lastProgressSummary]);
+      const dueText = formatDateTime(task.time, {
+        tz: assigneeProfile?.tz ?? process.env.DEFAULT_TIMEZONE,
+        locale: lang,
+      });
       const ownerMention = toSlackMention(task.initiator || task.createdBy);
 
       const headerByReason: Record<string, string> = {

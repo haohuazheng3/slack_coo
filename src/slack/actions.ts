@@ -3,11 +3,7 @@ import { FunctionRegistry } from '../orchestrator/functionRegistry';
 import { handleConversationTurn } from '../orchestrator/handleConversationTurn';
 import { prisma } from '../lib/prisma';
 import { buildTaskListMessage } from './listTasks';
-import {
-  syncChannelTaskCard,
-  persistChannelMessageTs,
-  refreshOwnerHome,
-} from './taskCardUpdater';
+import { refreshOwnerHome } from './taskCardUpdater';
 import { createLogger } from '../lib/logger';
 import { buildUserMessagePayload, getConversationKey } from '../lib/sendHelpers';
 import { conversationStore } from '../orchestrator/conversationStore';
@@ -60,10 +56,6 @@ export async function consumeReasonReply(userId: string, channelId: string, text
       },
     });
 
-    const ts = await syncChannelTaskCard(client, updated);
-    if (ts && ts !== updated.channelMessageTs) {
-      await persistChannelMessageTs(updated.id, ts);
-    }
     const ownerId = updated.initiator || updated.createdBy;
     if (ownerId) refreshOwnerHome(client, ownerId).catch(() => undefined);
 
@@ -110,10 +102,6 @@ export function registerActions(app: App, registry: FunctionRegistry) {
         },
       });
 
-      const ts = await syncChannelTaskCard(client, updated);
-      if (ts && ts !== updated.channelMessageTs) {
-        await persistChannelMessageTs(updated.id, ts);
-      }
       const ownerId = updated.initiator || updated.createdBy;
       if (ownerId) refreshOwnerHome(client, ownerId).catch(() => undefined);
 
@@ -286,10 +274,6 @@ export function registerActions(app: App, registry: FunctionRegistry) {
         },
       });
 
-      const ts = await syncChannelTaskCard(client, updated);
-      if (ts && ts !== updated.channelMessageTs) {
-        await persistChannelMessageTs(updated.id, ts);
-      }
       const ownerId = updated.initiator || updated.createdBy;
       if (ownerId) {
         refreshOwnerHome(client, ownerId).catch(() => undefined);

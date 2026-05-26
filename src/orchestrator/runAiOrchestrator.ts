@@ -9,6 +9,7 @@ import {
 import { ConversationMessage } from './conversationStore';
 import { extractFunctionCalls, ParsedFunctionCall } from './parseAiResponse';
 import { createLogger } from '../lib/logger';
+import { getUserProfile } from '../lib/userProfile';
 
 const log = createLogger('Orchestrator');
 
@@ -125,6 +126,23 @@ export async function runAiOrchestrator(
   const { registry, messages, context, organizationName, situationBlock, triggerHint } = input;
   const functions = registry.list();
 
+  // Resolve the speaker's actual Slack timezone so "tomorrow 6pm" gets parsed
+  // in their local time — not in UTC, and not in the server's TZ. Falls back
+  // to DEFAULT_TIMEZONE if the lookup fails (Slack rate limit, missing scope).
+  // Cached for 6 hours per user so this isn't a hot path.
+  let speakerTz: string | null = null;
+  let speakerTzLabel: string | null = null;
+  try {
+    const profile = await getUserProfile(context.slack.client, context.slack.userId, {
+      teamId: context.slack.teamId ?? null,
+      enterpriseId: context.slack.enterpriseId ?? null,
+    });
+    speakerTz = profile?.tz ?? null;
+    speakerTzLabel = profile?.tzLabel ?? null;
+  } catch (err) {
+    log.warn('Could not resolve speaker timezone', { error: String(err) });
+  }
+
   const systemBlocks = buildSystemPrompt(functions, {
     userMention: `<@${context.slack.userId}>`,
     channelId: context.slack.channelId,
@@ -132,7 +150,8 @@ export async function runAiOrchestrator(
     isDirectMessage: context.slack.channelId.startsWith('D'),
     organizationName,
     currentIsoTime: new Date().toISOString(),
-    timezone: process.env.DEFAULT_TIMEZONE,
+    timezone: speakerTz ?? process.env.DEFAULT_TIMEZONE,
+    timezoneLabel: speakerTzLabel,
     situationBlock,
     triggerHint,
   });

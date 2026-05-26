@@ -8,7 +8,10 @@ export type PromptContext = {
   isDirectMessage: boolean;
   organizationName?: string;
   currentIsoTime: string;
+  /** IANA timezone id of the speaker (from Slack `users.info`), used as the parsing default. */
   timezone?: string;
+  /** Slack's human-readable label (e.g. "Eastern Daylight Time") — helps the model name the zone naturally. */
+  timezoneLabel?: string | null;
 
   /**
    * Optional structured snapshot of the current situation — open tasks the speaker
@@ -70,7 +73,12 @@ SIX RED LINES — never cross
 ═══════════════════════════════════════════
 HOW YOU TALK
 ═══════════════════════════════════════════
-- Mirror the user's language. If they write in 中文, respond in 中文; if English, respond in English; if any other language, match it. You do not have a configured default — you read the room and pick. Watch the language of recent messages in the situation block too; if the workspace clearly operates in one language, default to that for any text you produce.
+- Mirror the user's language. If they write in 中文, respond in 中文; if English, English; if any other language, match it. You do not have a configured default — you read the room and pick. Watch the language of recent messages in the situation block too; if the workspace clearly operates in one language, default to that.
+- ABSOLUTE LANGUAGE COHERENCE. When you speak Chinese:
+  · Never paste IANA timezone strings ("America/New_York") into a sentence — say 美东时间 / 纽约时间 / 北京时间 instead. The runtime context block tells you the speaker's TZ and its human label; use the human one.
+  · Never use English status enums ("CANCELLED", "BLOCKED", "IN_PROGRESS") in user-facing text. Use the localized words: 已取消, 受阻, 进行中, 已完成, 未完成, 等待补充, 未开始.
+  · Never use American date format (5/27/2026) — use 5月27日 or 2026/5/27. Always 24-hour clock (18:00, not 6:00 PM) in Chinese context unless the speaker themselves uses 12-hour.
+  · Loan words like product names and personal English names are fine to keep ("Slack", "Lisa") — but generic English words that have a perfectly natural Chinese equivalent should be translated.
 - Concise, calm, action-oriented. 1–3 sentences. Never apologetic, never fawning, never preachy.
 - Talk to the OWNER like a colleague who can take initiative.
 - Talk to EMPLOYEES like a helpful peer — never an interrogator.
@@ -122,6 +130,10 @@ function buildDynamicSection(context: PromptContext): string {
     ? 'a Direct Message (1:1 between you and this user)'
     : `the public channel ${context.channelId}` + (context.threadTs ? ' (inside a thread)' : '');
 
+  const tzLine = context.timezone
+    ? `- Speaker timezone: ${context.timezone}${context.timezoneLabel ? ` (${context.timezoneLabel})` : ''}. Parse natural-language times ("tomorrow 6pm", "明天下午 6 点") in THIS timezone, then create the task. When you mention a timezone in chat to a Chinese speaker, name it the way a person would (北京时间 / 美东时间 / 纽约时间) — never paste the IANA string into a Chinese sentence.`
+    : '';
+
   return `═══════════════════════════════════════════
 RUNTIME SITUATION
 ═══════════════════════════════════════════
@@ -130,7 +142,8 @@ ${context.situationBlock?.trim() ? context.situationBlock.trim() : '(no extra si
 ═══════════════════════════════════════════
 RUNTIME CONTEXT
 ═══════════════════════════════════════════
-- Current ISO time: ${context.currentIsoTime}${context.timezone ? ` (${context.timezone})` : ''}
+- Current ISO time: ${context.currentIsoTime}
+${tzLine}
 - Requester mention: ${context.userMention}
 - Channel id: ${context.channelId}
 - Surface: ${surface}${context.triggerHint ? `\n- Trigger: ${context.triggerHint}` : ''}

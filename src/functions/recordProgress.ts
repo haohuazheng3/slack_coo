@@ -3,12 +3,9 @@ import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { interpretEmployeeProgress } from '../services/aiSummarizer';
 import { toSlackMention } from '../utils/assignee';
 import { openDm } from '../lib/sendHelpers';
-import {
-  syncChannelTaskCard,
-  persistChannelMessageTs,
-  refreshOwnerHome,
-} from '../slack/taskCardUpdater';
+import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { createLogger } from '../lib/logger';
+import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
 
 const log = createLogger('RecordProgress');
 
@@ -103,51 +100,67 @@ export function recordProgressFunction(): RegisteredFunction {
         progress: updated.progressPercent,
       });
 
-      const ts = await syncChannelTaskCard(slack.client, updated);
-      if (ts && ts !== updated.channelMessageTs) {
-        await persistChannelMessageTs(updated.id, ts);
-      }
+      // No channel card sync anymore — channel cards were dropped in favor of
+      // natural conversational confirmations. Owner-facing summary follows.
 
       const ownerId = updated.initiator || updated.createdBy;
       if (ownerId) {
         const ownerDm = await openDm(slack.client, ownerId);
         if (ownerDm) {
-          const headerEmoji = isComplete ? '✅' : isFailure ? '❌' : finalStatus === 'BLOCKED' ? '⛔' : '🚧';
+          // Conversational DM, locale-aware. The orchestrator's natural reply
+          // covers the employee-side; this is the owner's "ping" so they don't
+          // have to be staring at the dashboard to know progress moved.
+          const lang = detectLanguageFromTexts([
+            updated.title,
+            updated.description,
+            finalSummary,
+            reply,
+          ]);
+          const translator = getTranslator(lang);
+          const statusWord = translator.statusLabel(finalStatus);
+          const assignee = toSlackMention(updated.assignee);
+          const blockerSuffix = interpretation.blocker
+            ? lang === 'zh'
+              ? `卡点:${interpretation.blocker}`
+              : `Blocker: ${interpretation.blocker}`
+            : null;
+
+          const headline =
+            lang === 'zh'
+              ? isComplete
+                ? `✅ ${assignee} 已完成《${updated.title}》。`
+                : isFailure
+                  ? `❌ ${assignee} 这边没能完成《${updated.title}》。`
+                  : finalStatus === 'BLOCKED'
+                    ? `⛔ ${assignee} 在《${updated.title}》上卡住了。`
+                    : `🚧 ${assignee}《${updated.title}》— ${statusWord}(${updated.progressPercent}%)。`
+              : isComplete
+                ? `✅ ${assignee} finished "${updated.title}".`
+                : isFailure
+                  ? `❌ ${assignee} couldn't complete "${updated.title}".`
+                  : finalStatus === 'BLOCKED'
+                    ? `⛔ ${assignee} is blocked on "${updated.title}".`
+                    : `🚧 ${assignee} on "${updated.title}" — ${statusWord} (${updated.progressPercent}%).`;
+
+          const summaryLine =
+            lang === 'zh' ? `他的原话:"${reply.trim()}"` : `Their words: "${reply.trim()}"`;
+
+          const bodyLines = [headline, '', finalSummary, blockerSuffix, '', `_${summaryLine}_`].filter(
+            Boolean
+          ) as string[];
+
           await slack.client.chat.postMessage({
             channel: ownerDm,
-            text: `${headerEmoji} Progress update on "${updated.title}"`,
-            blocks: [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: [
-                    `${headerEmoji} *${updated.title}* — ${labelOf(finalStatus)}`,
-                    `*Assignee:* ${toSlackMention(updated.assignee)}`,
-                    `*Progress:* ${updated.progressPercent}%`,
-                    `*Summary:* ${finalSummary}`,
-                    interpretation.blocker
-                      ? `*Blocker:* ${interpretation.blocker}`
-                      : '',
-                  ]
-                    .filter(Boolean)
-                    .join('\n'),
-                },
-              },
-              {
-                type: 'context',
-                elements: [
-                  {
-                    type: 'mrkdwn',
-                    text: `_Open Home tab for full dashboard. Original message from ${toSlackMention(context.slack.userId)}:_\n>${reply.replace(/\n/g, '\n>')}`,
-                  },
-                ],
-              },
-            ],
+            text: headline,
+            mrkdwn: true,
+            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: bodyLines.join('\n') } }],
           });
         }
 
-        refreshOwnerHome(slack.client, ownerId).catch(() => undefined);
+        refreshOwnerHome(slack.client, ownerId, {
+          teamId: slack.teamId ?? null,
+          enterpriseId: slack.enterpriseId ?? null,
+        }).catch(() => undefined);
       }
 
       return {
@@ -184,16 +197,3 @@ function isValidStatus(s: unknown): s is TaskStatus {
   return typeof s === 'string' && all.includes(s as TaskStatus);
 }
 
-function labelOf(status: TaskStatus): string {
-  return (
-    {
-      PENDING_CLARIFICATION: 'Awaiting clarification',
-      NOT_STARTED: 'Not started',
-      IN_PROGRESS: 'In progress',
-      BLOCKED: 'Blocked',
-      COMPLETED: 'Completed',
-      FAILED: 'Not completed',
-      CANCELLED: 'Cancelled',
-    } as Record<TaskStatus, string>
-  )[status];
-}

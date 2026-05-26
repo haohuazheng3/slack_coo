@@ -2,6 +2,7 @@ import { Task } from '@prisma/client';
 import { toSlackMention } from '../utils/assignee';
 import { buildProgressBar } from './progressBar';
 import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
+import { formatDateTime } from '../lib/timezone';
 
 export type RenderableTask = Pick<
   Task,
@@ -56,7 +57,13 @@ export function buildTaskCardBlocks(
   const statusLabel = translator.statusLabel(task.status);
   const priorityBadge = translator.priorityBadge(task.priority);
   const progressBar = buildProgressBar(task.progressPercent);
-  const dueText = task.time.toLocaleString();
+  // No viewer TZ available at this layer — Home tab + list view render synchronously
+  // from in-memory Task objects, no Slack client in scope. Fall back to the workspace
+  // default. For the dashboard and individual DMs we DO use the per-user TZ.
+  const dueText = formatDateTime(task.time, {
+    tz: process.env.DEFAULT_TIMEZONE,
+    locale: translator.language,
+  });
   const isOverdue =
     task.time.getTime() < Date.now() &&
     task.status !== 'COMPLETED' &&
@@ -184,5 +191,6 @@ export function buildTaskFallbackText(
   const t =
     translator ??
     getTranslator(detectLanguageFromTexts([task.title, task.description, task.lastProgressSummary]));
-  return `[${t.statusLabel(task.status)}] ${task.title} • ${t.t('card.due')} ${task.time.toLocaleString()}`;
+  const due = formatDateTime(task.time, { tz: process.env.DEFAULT_TIMEZONE, locale: t.language });
+  return `[${t.statusLabel(task.status)}] ${task.title} • ${t.t('card.due')} ${due}`;
 }

@@ -117,3 +117,49 @@ export async function getBotUserIdForTeam(
   });
   return row?.botUserId ?? null;
 }
+
+/**
+ * The Slack user id of the person who installed the app to this workspace.
+ *
+ * We treat them as the "workspace owner" for engagement decisions — when they
+ * speak in a channel, the bot engages directly without going through the
+ * ambient relevance gate. Employees (everyone else) still get the gate, so
+ * they aren't followed everywhere they post.
+ *
+ * Cached in memory per (teamId, enterpriseId) — installer changes only when
+ * someone re-installs from another account, which is rare. We invalidate on
+ * `evictWorkspaceOwnerCache` (called from `app_uninstalled`).
+ */
+const installerCache = new Map<string, { id: string | null; at: number }>();
+const INSTALLER_TTL_MS = 30 * 60 * 1000;
+
+function ownerCacheKey(teamId: string | null, enterpriseId: string | null): string {
+  return `${teamId ?? '-'}|${enterpriseId ?? '-'}`;
+}
+
+export async function getInstallerUserId(
+  teamId: string | null | undefined,
+  enterpriseId?: string | null
+): Promise<string | null> {
+  if (!teamId && !enterpriseId) return null;
+  const k = ownerCacheKey(teamId ?? null, enterpriseId ?? null);
+  const hit = installerCache.get(k);
+  if (hit && Date.now() - hit.at < INSTALLER_TTL_MS) return hit.id;
+  const row = await prisma.slackInstallation.findFirst({
+    where: {
+      teamId: teamId ?? null,
+      enterpriseId: enterpriseId ?? null,
+    },
+    select: { installerUserId: true },
+  });
+  const id = row?.installerUserId ?? null;
+  installerCache.set(k, { id, at: Date.now() });
+  return id;
+}
+
+export function evictWorkspaceOwnerCache(
+  teamId: string | null | undefined,
+  enterpriseId?: string | null
+): void {
+  installerCache.delete(ownerCacheKey(teamId ?? null, enterpriseId ?? null));
+}

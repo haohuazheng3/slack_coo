@@ -1,10 +1,7 @@
 import { TaskStatus } from '@prisma/client';
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
-import {
-  syncChannelTaskCard,
-  persistChannelMessageTs,
-  refreshOwnerHome,
-} from '../slack/taskCardUpdater';
+import { refreshOwnerHome } from '../slack/taskCardUpdater';
+import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
 
 const VALID_STATUS: TaskStatus[] = [
   'PENDING_CLARIFICATION',
@@ -62,15 +59,24 @@ export function updateTaskStatusFunction(): RegisteredFunction {
           },
         });
 
-        const ts = await syncChannelTaskCard(context.slack.client, updated);
-        if (ts && ts !== updated.channelMessageTs) {
-          await persistChannelMessageTs(updated.id, ts);
-        }
         const ownerId = updated.initiator || updated.createdBy;
-        if (ownerId) refreshOwnerHome(context.slack.client, ownerId).catch(() => undefined);
+        if (ownerId) {
+          refreshOwnerHome(context.slack.client, ownerId, {
+            teamId: context.slack.teamId ?? null,
+            enterpriseId: context.slack.enterpriseId ?? null,
+          }).catch(() => undefined);
+        }
 
+        // Localized status announcement. The raw enum (`CANCELLED`) is for the
+        // database and the AI's tool-call context — never for the user-facing
+        // string. Use the i18n table so a Chinese workspace sees 已取消, not
+        // CANCELLED. The orchestrator's own natural-language reply follows
+        // this and provides the conversational framing.
+        const lang = detectLanguageFromTexts([updated.title, updated.description, updated.lastProgressSummary]);
+        const translator = getTranslator(lang);
+        const noteSuffix = args.note ? `\n_${args.note}_` : '';
         await context.slack.send(
-          `📌 *${updated.title}* → *${nextStatus}*${args.note ? `\n_${args.note}_` : ''}`
+          `📌 *${updated.title}* → *${translator.statusLabel(nextStatus)}*${noteSuffix}`
         );
 
         return {

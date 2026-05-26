@@ -4,15 +4,25 @@ import { ParsedTaskInput, normalizeToDBTask } from '../services/normalizeTask';
 import { extractUserId, toSlackMention } from '../utils/assignee';
 import { prisma } from '../lib/prisma';
 import { openDm } from '../lib/sendHelpers';
-import {
-  syncChannelTaskCard,
-  persistChannelMessageTs,
-  refreshOwnerHome,
-} from '../slack/taskCardUpdater';
+import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { createLogger } from '../lib/logger';
 import { resolveAssignee, ResolvedCandidate } from '../services/nicknameResolver';
+import { getUserProfile } from '../lib/userProfile';
+import { formatDateTime } from '../lib/timezone';
 
 const log = createLogger('CreateTask');
+
+/**
+ * Short, language-aware priority badge used inside conversational DMs.
+ * Kept inline rather than going through i18n because the format here is bespoke
+ * (no decorations, just the label) and not part of the wider task-card vocabulary.
+ */
+function priorityLabel(p: TaskPriority, locale: 'en' | 'zh'): string {
+  if (locale === 'zh') {
+    return ({ LOW: '🟢 低', NORMAL: '🟡 普通', HIGH: '🟠 高', URGENT: '🔴 紧急' } as const)[p];
+  }
+  return ({ LOW: '🟢 LOW', NORMAL: '🟡 NORMAL', HIGH: '🟠 HIGH', URGENT: '🔴 URGENT' } as const)[p];
+}
 
 type CreateTaskArgs = {
   title: string;
@@ -212,83 +222,75 @@ export function createTaskFunction(): RegisteredFunction {
       });
       log.info('Task created', { taskId: created.id, title: created.title });
 
-      const cardTs = await syncChannelTaskCard(context.slack.client, created);
-      if (cardTs) {
-        await persistChannelMessageTs(created.id, cardTs);
-      }
+      // No channel card. The orchestrator's natural-language reply is the
+      // user-visible confirmation; details live in the web dashboard now.
+      // Owner sees "好的,Lisa 明天 6pm 出 banner" — not a block-kit table.
 
-      const dueText = created.time.toLocaleString();
-      const assigneeMention = toSlackMention(created.assignee);
-      const assigneesMention = Array.isArray(created.assignees) && created.assignees.length > 0
-        ? created.assignees.map((a) => toSlackMention(a)).join(', ')
-        : assigneeMention;
+      // DM the assignee — in THEIR timezone, in THEIR language. Both come from
+      // their Slack profile (users.info → tz + locale-inferred from task title).
+      const assigneeProfile = await getUserProfile(context.slack.client, created.assignee, {
+        teamId: context.slack.teamId ?? null,
+        enterpriseId: context.slack.enterpriseId ?? null,
+      });
+      const assigneeTz = assigneeProfile?.tz ?? process.env.DEFAULT_TIMEZONE;
+      // Locale picked from task content — same CJK-detection heuristic we use elsewhere.
+      const localeSample = `${created.title || ''} ${created.description || ''}`;
+      const dmLocale: 'en' | 'zh' = /[一-鿿]/.test(localeSample) ? 'zh' : 'en';
+      const dueText = formatDateTime(created.time, { tz: assigneeTz, locale: dmLocale });
 
       const assigneeDm = await openDm(context.slack.client, created.assignee);
       if (assigneeDm) {
         const ownerMention = toSlackMention(created.initiator || created.createdBy);
-        // Notification framing (per product brief §2.2 / §3 red line #4):
-        //   - explain the *why* / context so the employee knows it matters
-        //   - give them a question channel back through the bot (shielding them from the owner)
-        //   - lower the reply bar to "one sentence is fine" so honest replies stay cheap
-        const intro = `Hey — ${ownerMention} just asked me to set this up with you.`;
-        const contextLine = description
-          ? `📝 ${description}`
-          : `_Heads up: this came in as part of a wider request from ${ownerMention}. If anything's unclear about scope or expectations, ask me here and I'll loop in with them so you don't have to re-ping the owner._`;
-        const questionChannel =
-          `❓ *Something unclear?* Just reply here — I'll ask the owner for you so you don't have to chase them, and that saves you a rework later.`;
-        const replyHint =
-          `💬 No formal updates needed. A one-line "started", "halfway", "blocked on X", or "done" whenever it changes is plenty.`;
+        // Conversational DM — no card UI, no stacked emoji headers. Reads as a
+        // teammate-style note. Bilingual: the locale follows the task language.
+        const body =
+          dmLocale === 'zh'
+            ? [
+                `${ownerMention} 让我把这件事跟你对一下:`,
+                ``,
+                `*${created.title}*`,
+                `📅 截止 ${dueText}` + (priority !== 'NORMAL' ? `  ·  ${priorityLabel(priority, 'zh')}` : ''),
+                description ? `\n${description}` : '',
+                ``,
+                `有不清楚的直接回我这条 DM,我帮你跟 ${ownerMention} 对齐——你不用追老板。一两句话告诉我进展(开始了 / 一半 / 卡在哪 / 做完了)就行。`,
+              ]
+                .filter(Boolean)
+                .join('\n')
+            : [
+                `Hey — ${ownerMention} just asked me to set this up with you.`,
+                ``,
+                `*${created.title}*`,
+                `📅 Due ${dueText}` + (priority !== 'NORMAL' ? `  ·  ${priorityLabel(priority, 'en')}` : ''),
+                description ? `\n${description}` : '',
+                ``,
+                `Reply here if anything's unclear and I'll loop in ${ownerMention} for you. A one-liner like "started" / "halfway" / "blocked on X" / "done" whenever it changes is plenty.`,
+              ]
+                .filter(Boolean)
+                .join('\n');
 
         await context.slack.client.chat.postMessage({
           channel: assigneeDm,
-          text: `New task: ${created.title}`,
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: [
-                  intro,
-                  ``,
-                  `*${created.title}*`,
-                  `📅 Due: ${dueText}` + (priority !== 'NORMAL' ? `  ·  🏷 ${priority}` : ''),
-                  ``,
-                  contextLine,
-                  ``,
-                  questionChannel,
-                  replyHint,
-                ]
-                  .filter(Boolean)
-                  .join('\n'),
-              },
-            },
-          ],
+          text: dmLocale === 'zh' ? `新任务:${created.title}` : `New task: ${created.title}`,
+          mrkdwn: true,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: body } }],
         });
       }
 
+      // No separate owner DM — the orchestrator's natural-language reply to the
+      // owner already serves as the confirmation. Posting a second "✅ Task
+      // created..." DM was redundant and reverted to mechanical-feeling UI.
       const initiatorId = created.initiator || created.createdBy;
-      if (initiatorId && initiatorId !== created.assignee) {
-        const ownerDm = await openDm(context.slack.client, initiatorId);
-        if (ownerDm) {
-          // If we auto-learned the assignee from a fuzzy profile match, surface that fact
-          // explicitly so the owner can correct us (red line #2 — confirm-and-allow-fix
-          // beats silent guessing).
-          const lines = [`✅ Task created for ${assigneesMention}: ${created.title}`];
-          if (resolverNote) lines.push(`_${resolverNote}_`);
-          await context.slack.client.chat.postMessage({
-            channel: ownerDm,
-            text: lines.join('\n'),
-          });
-        }
-      }
 
       if (initiatorId) {
-        refreshOwnerHome(context.slack.client, initiatorId).catch(() => undefined);
+        refreshOwnerHome(context.slack.client, initiatorId, {
+          teamId: context.slack.teamId ?? null,
+          enterpriseId: context.slack.enterpriseId ?? null,
+        }).catch(() => undefined);
       }
 
       return {
         status: 'success',
-        message: `Created task "${created.title}" for ${assigneeMention}.`,
+        message: `Created task "${created.title}" for ${toSlackMention(created.assignee)}.`,
         data: {
           taskId: created.id,
           title: created.title,

@@ -22,7 +22,7 @@ import {
 import { buildHomeView } from './slack/homeView';
 import { getConversationKey } from './lib/sendHelpers';
 
-import { prismaInstallationStore } from './installation/installationStore';
+import { prismaInstallationStore, getInstallerUserId } from './installation/installationStore';
 import {
   failureHtml,
   installLandingHtml,
@@ -146,12 +146,28 @@ receiver.router.get('/dashboard', async (req, res) => {
       enterpriseId: eid,
     });
 
+    // Look up the viewer's timezone so every deadline on the page renders in
+    // their local clock — the whole reason the user complained about UTC times.
+    let viewerTz: string | null = null;
+    try {
+      const wsClient = await (await import('./lib/slackClient')).getClientForTeam(tid, eid);
+      if (wsClient) {
+        const profile = await (await import('./lib/userProfile')).getUserProfile(wsClient, uid, {
+          teamId: tid,
+          enterpriseId: eid,
+        });
+        viewerTz = profile?.tz ?? null;
+      }
+    } catch (err) {
+      log.warn('Could not resolve dashboard viewer timezone', { error: String(err) });
+    }
+
     // Deep-link back to Slack — opens the Aiptima Home tab if possible.
     const slackDeepLink = tid
       ? `slack://app?team=${encodeURIComponent(tid)}&id=A_AIPTIMA&tab=home`
       : 'https://slack.com/';
 
-    let html = renderDashboard({ snapshot, langOverride, slackDeepLink });
+    let html = renderDashboard({ snapshot, langOverride, slackDeepLink, viewerTz });
 
     // Swap the lang-switcher placeholder for real URLs that preserve the token.
     // (We don't want the token interpolated twice into the template body.)
@@ -281,9 +297,31 @@ app.message(async ({ message, client, context }) => {
     }
   }
 
-  // Ambient path: any other channel message. Let the cheap LLM gate decide whether
-  // we'd add value by engaging. Defaults to silence — if the gate says no, this
-  // handler returns without the user ever knowing the bot was listening.
+  // Owner-priority engagement: if the speaker is the workspace installer (the
+  // owner who set Aiptima up), engage automatically — no ambient gate, no LLM
+  // round-trip to decide whether to listen. Their channel messages are nearly
+  // always directive or work-related, and making them @-mention to be heard
+  // defeats the "quiet colleague" feel we're going for. Other speakers still
+  // get the gate so employees aren't shadowed across every channel.
+  const installerId = await getInstallerUserId(teamId, enterpriseId);
+  if (installerId && userId === installerId) {
+    await handleConversationTurn({
+      client,
+      registry: functionRegistry,
+      userId,
+      channelId,
+      teamId,
+      enterpriseId,
+      threadTs,
+      fallbackTs: ts,
+      text,
+      triggerHint: 'owner_channel_speech',
+    });
+    return;
+  }
+
+  // Ambient path: any other channel message from someone other than the owner.
+  // The LLM gate defaults to silence — if it says no, we never speak.
   const botUserId = context.botUserId ?? (await getBotUserId(teamId, enterpriseId));
   let gate;
   try {
@@ -345,6 +383,8 @@ app.event('app_uninstalled', async ({ context }) => {
     }
     const { evictTeamFromCache } = await import('./lib/slackClient');
     evictTeamFromCache(teamId, enterpriseId);
+    const { evictWorkspaceOwnerCache } = await import('./installation/installationStore');
+    evictWorkspaceOwnerCache(teamId, enterpriseId);
     log.info('App uninstalled, installation removed', { teamId, enterpriseId });
   } catch (err) {
     log.error('Failed to handle app_uninstalled', { error: String(err) });
