@@ -64,11 +64,12 @@ export async function shouldEngageAmbient(input: AmbientGateInput): Promise<Ambi
   const trimmed = (input.text ?? '').trim();
   if (!trimmed) return { engage: false, why: 'empty' };
 
-  // Direct @-mention of the bot is an explicit signal — short-circuit. (The
-  // app_mention event would also fire for this; we just don't want the gate
-  // to second-guess a direct address.)
+  // If the message @-mentions the bot, the `app_mention` event handler is
+  // the right entry point — not this one. Slack delivers BOTH events for a
+  // channel mention, so if we engaged here too the orchestrator would run
+  // twice on the same message. Hand it off cleanly.
   if (input.botUserId && trimmed.includes(`<@${input.botUserId}>`)) {
-    return { engage: true, why: 'direct_mention' };
+    return { engage: false, why: 'app_mention_handles_this' };
   }
 
   const [openTasksInChannel, openTasksWithSpeaker] = await Promise.all([

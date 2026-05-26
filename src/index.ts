@@ -12,6 +12,7 @@ import { conversationStore } from './orchestrator/conversationStore';
 
 import { startProgressCheckScheduler } from './scheduler/progressCheck';
 import { shouldEngageAmbient } from './orchestrator/ambientGate';
+import { eventDedupeKey, markSeenOrSkip } from './lib/eventDedupe';
 
 import {
   registerActions,
@@ -173,6 +174,14 @@ app.event('app_mention', async ({ event, client, context }) => {
 
   if (!userId || !channelId) return;
 
+  // Slack delivers both `app_mention` and `message.channels` for a channel
+  // @-mention; we want to process the message exactly once. The dedupe key
+  // is the underlying message ts, which is the same across both events.
+  if (markSeenOrSkip(eventDedupeKey(event)) === 'duplicate') {
+    log.info('Skipping duplicate app_mention', { ts });
+    return;
+  }
+
   const teamId = context.teamId ?? null;
   const enterpriseId = context.enterpriseId ?? null;
 
@@ -212,6 +221,22 @@ app.message(async ({ message, client, context }) => {
   const teamId = context.teamId ?? null;
   const enterpriseId = context.enterpriseId ?? null;
   const isDm = channelId.startsWith('D');
+
+  // Channel messages that @-mention the bot are ALREADY handled by the
+  // `app_mention` event handler above. Slack delivers both, so we have to
+  // pick a lane and skip the other one here — otherwise the orchestrator
+  // runs twice and we end up creating duplicate tasks etc.
+  if (!isDm) {
+    const botUid = context.botUserId ?? (await getBotUserId(teamId, enterpriseId));
+    if (botUid && text.includes(`<@${botUid}>`)) return;
+  }
+
+  // Belt-and-suspenders dedupe for Slack at-least-once retries and any
+  // other subscription overlap we haven't accounted for.
+  if (markSeenOrSkip(eventDedupeKey(message)) === 'duplicate') {
+    log.info('Skipping duplicate message', { channelId, ts });
+    return;
+  }
 
   if (isDm && isAwaitingReasonFromUser(userId)) {
     const handled = await consumeReasonReply(userId, channelId, text, client);
