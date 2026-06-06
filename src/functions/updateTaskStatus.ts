@@ -1,7 +1,6 @@
 import { TaskStatus } from '@prisma/client';
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
-import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
 
 const VALID_STATUS: TaskStatus[] = [
   'PENDING_CLARIFICATION',
@@ -37,10 +36,10 @@ export function updateTaskStatusFunction(): RegisteredFunction {
         nextStatus = args.completed ? 'COMPLETED' : 'IN_PROGRESS';
       }
       if (!nextStatus || !VALID_STATUS.includes(nextStatus)) {
-        return {
-          status: 'error',
-          message: `status must be one of ${VALID_STATUS.join(', ')}.`,
-        };
+        // The allowed values live in the tool description (which feeds the
+        // prompt). At runtime we don't echo the enum list back — that's an
+        // internal vocabulary that doesn't belong in any user-visible path.
+        return { status: 'error', message: 'Unknown status value.' };
       }
 
       const isCompleted = nextStatus === 'COMPLETED';
@@ -67,22 +66,20 @@ export function updateTaskStatusFunction(): RegisteredFunction {
           }).catch(() => undefined);
         }
 
-        // Localized status announcement. The raw enum (`CANCELLED`) is for the
-        // database and the AI's tool-call context — never for the user-facing
-        // string. Use the i18n table so a Chinese workspace sees 已取消, not
-        // CANCELLED. The orchestrator's own natural-language reply follows
-        // this and provides the conversational framing.
-        const lang = detectLanguageFromTexts([updated.title, updated.description, updated.lastProgressSummary]);
-        const translator = getTranslator(lang);
-        const noteSuffix = args.note ? `\n_${args.note}_` : '';
-        await context.slack.send(
-          `📌 *${updated.title}* → *${translator.statusLabel(nextStatus)}*${noteSuffix}`
-        );
+        // NO templated announcement. The orchestrator's natural-language reply
+        // ("好的,已取消了《banner》") covers the user-visible confirmation.
+        // A "📌 *X* → *Y*" widget stapled to every status change reads as a
+        // dashboard pin, not a colleague.
 
         return {
           status: 'success',
-          message: `Task ${taskId} status set to ${nextStatus}.`,
-          data: { taskId, status: nextStatus, action: 'status_updated' },
+          message: 'Task status updated.',
+          data: {
+            taskId,
+            status: nextStatus,
+            taskTitle: updated.title,
+            action: 'status_updated',
+          },
         };
       } catch (error: any) {
         return {

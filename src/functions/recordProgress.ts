@@ -1,32 +1,37 @@
 import { TaskStatus } from '@prisma/client';
 import { RegisteredFunction } from '../orchestrator/functionRegistry';
 import { interpretEmployeeProgress } from '../services/aiSummarizer';
-import { toSlackMention } from '../utils/assignee';
 import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { createLogger } from '../lib/logger';
-import { detectLanguageFromTexts, getTranslator } from '../lib/i18n';
 
 const log = createLogger('RecordProgress');
 
 type RecordProgressArgs = {
-
   taskId?: string;
-
   employeeReply: string;
 
   status?: TaskStatus;
   progressPercent?: number;
   summary?: string;
+
+  /**
+   * Who reported this update.
+   *   - 'assignee' (default): the employee themselves replied — the normal flow.
+   *   - 'owner': the OWNER is reporting on behalf of the assignee (e.g. "Lisa
+   *     told me face-to-face she's done"). Don't DM the owner a confirmation of
+   *     their own statement; do DM the assignee a "fyi I closed this out" note.
+   */
+  reportedBy?: 'assignee' | 'owner';
 };
 
 export function recordProgressFunction(): RegisteredFunction {
   return {
     name: 'RecordProgress',
     description:
-      "When an employee replies in DM about a task (or in any context that gives you their status), interpret the reply, store an AI-generated owner-facing summary, update task status/progress, then notify the owner via DM and refresh the channel card + Home tab. Pass the employee's raw reply as employeeReply; you may also override the status, progressPercent, and summary if you are confident.",
+      "When an employee replies in DM about a task (or in any context that gives you their status), interpret the reply, store the owner-facing summary, and DM the owner. Pass the raw reply as `employeeReply`. If the OWNER is reporting on behalf of the assignee (\"Lisa told me she's done\"), pass `reportedBy: 'owner'` — we won't DM the owner about their own statement, and we'll FYI the assignee instead. Bare acknowledgments (\"ok\", \"好的\") are NOT progress — don't call this tool for them.",
     inputExample:
-      '{"taskId":"clxyz123","employeeReply":"I have drafted the slides, blocked by missing data from finance."}',
+      '{"taskId":"clxyz123","employeeReply":"drafted slides, blocked on finance data","reportedBy":"assignee"}',
 
     handler: async (args: RecordProgressArgs, context) => {
       const { prisma, slack } = context;
@@ -43,8 +48,10 @@ export function recordProgressFunction(): RegisteredFunction {
 
       const task = await prisma.task.findUnique({ where: { id: taskId } });
       if (!task) {
-        return { status: 'error', message: `Task ${taskId} not found.` };
+        return { status: 'error', message: 'Task not found.' };
       }
+
+      const reportedBy = args.reportedBy ?? 'assignee';
 
       const interpretation = await interpretEmployeeProgress({
         taskTitle: task.title,
@@ -54,12 +61,35 @@ export function recordProgressFunction(): RegisteredFunction {
         employeeReply: reply,
       });
 
-      const finalStatus = args.status && isValidStatus(args.status) ? args.status : interpretation.status;
+      // ACKNOWLEDGED short-circuit: a bare "ok" / "好的" from the assignee is a
+      // signal of presence, not progress. Update lastProgressAt so we know we
+      // heard them, then return without DMing the owner or fabricating a
+      // status. Reply to the assignee with a short nod and stop.
+      if (interpretation.status === 'ACKNOWLEDGED' && reportedBy === 'assignee') {
+        await prisma.task.update({
+          where: { id: taskId },
+          data: { lastProgressAt: new Date() },
+        });
+        // Short nod back to the assignee — locale matches the reply itself.
+        const ackBack = /[一-鿿]/.test(reply) ? '收到。' : 'got it.';
+        await context.slack.send(ackBack);
+        return {
+          status: 'success',
+          message: 'Acknowledged-only reply, no progress recorded.',
+          data: { taskId, action: 'acknowledged' },
+        };
+      }
+
+      const finalStatus = (args.status && isValidStatus(args.status)
+        ? args.status
+        : interpretation.status === 'ACKNOWLEDGED'
+          ? 'IN_PROGRESS'
+          : interpretation.status) as TaskStatus;
       const finalPercent =
         typeof args.progressPercent === 'number'
           ? clamp(args.progressPercent)
-          : interpretation.progressPercent;
-      const finalSummary = (args.summary?.trim() || interpretation.ownerSummary).slice(0, 500);
+          : interpretation.progressPercent ?? 50;
+      const finalSummary = (args.summary?.trim() || interpretation.ownerSummary || reply).slice(0, 500);
 
       const isComplete = finalStatus === 'COMPLETED';
       const isFailure = finalStatus === 'FAILED';
@@ -85,7 +115,8 @@ export function recordProgressFunction(): RegisteredFunction {
       await prisma.progressUpdate.create({
         data: {
           taskId: updated.id,
-          source: 'employee_reply',
+          // Source distinguishes assignee speaking vs owner speaking on behalf.
+          source: reportedBy === 'owner' ? 'owner_reported_for_employee' : 'employee_reply',
           authorId: context.slack.userId,
           rawText: reply,
           summary: finalSummary,
@@ -105,56 +136,45 @@ export function recordProgressFunction(): RegisteredFunction {
 
       const ownerId = updated.initiator || updated.createdBy;
       if (ownerId) {
-        const ownerDm = await openDm(slack.client, ownerId);
-        if (ownerDm) {
-          // Conversational DM, locale-aware. The orchestrator's natural reply
-          // covers the employee-side; this is the owner's "ping" so they don't
-          // have to be staring at the dashboard to know progress moved.
-          const lang = detectLanguageFromTexts([
-            updated.title,
-            updated.description,
-            finalSummary,
-            reply,
-          ]);
-          const translator = getTranslator(lang);
-          const statusWord = translator.statusLabel(finalStatus);
-          const assignee = toSlackMention(updated.assignee);
-          const blockerSuffix = interpretation.blocker
-            ? lang === 'zh'
-              ? `卡点:${interpretation.blocker}`
-              : `Blocker: ${interpretation.blocker}`
-            : null;
+        if (reportedBy === 'owner') {
+          // Owner just told us themselves — don't DM the owner their own
+          // statement back. Instead, FYI the assignee that we closed it out.
+          if (updated.assignee && updated.assignee !== context.slack.userId) {
+            try {
+              const assigneeDm = await openDm(slack.client, updated.assignee);
+              if (assigneeDm) {
+                const isZh = /[一-鿿]/.test(updated.title + ' ' + reply);
+                const note = isZh
+                  ? `<@${ownerId}> 那边说《${updated.title}》已经完成了 — 我这边关掉了,有不对告诉我。`
+                  : `<@${ownerId}> mentioned "${updated.title}" is done — closing it out on my end. flag if that's wrong.`;
+                await postMessageWithFeedback(slack.client, {
+                  channel: assigneeDm,
+                  text: note,
+                });
+              }
+            } catch {
+              // best-effort
+            }
+          }
+        } else {
+          // Normal flow: assignee reported, owner gets the DM.
+          const ownerDm = await openDm(slack.client, ownerId);
+          if (ownerDm) {
+            const blocker = interpretation.blocker?.trim();
+            const quotedReply = reply
+              .trim()
+              .split('\n')
+              .map((l) => `> ${l}`)
+              .join('\n');
+            const bodyLines = [finalSummary, blocker, '', quotedReply].filter(Boolean) as string[];
 
-          const headline =
-            lang === 'zh'
-              ? isComplete
-                ? `✅ ${assignee} 已完成《${updated.title}》。`
-                : isFailure
-                  ? `❌ ${assignee} 这边没能完成《${updated.title}》。`
-                  : finalStatus === 'BLOCKED'
-                    ? `⛔ ${assignee} 在《${updated.title}》上卡住了。`
-                    : `🚧 ${assignee}《${updated.title}》— ${statusWord}(${updated.progressPercent}%)。`
-              : isComplete
-                ? `✅ ${assignee} finished "${updated.title}".`
-                : isFailure
-                  ? `❌ ${assignee} couldn't complete "${updated.title}".`
-                  : finalStatus === 'BLOCKED'
-                    ? `⛔ ${assignee} is blocked on "${updated.title}".`
-                    : `🚧 ${assignee} on "${updated.title}" — ${statusWord} (${updated.progressPercent}%).`;
-
-          const summaryLine =
-            lang === 'zh' ? `他的原话:"${reply.trim()}"` : `Their words: "${reply.trim()}"`;
-
-          const bodyLines = [headline, '', finalSummary, blockerSuffix, '', `_${summaryLine}_`].filter(
-            Boolean
-          ) as string[];
-
-          await postMessageWithFeedback(slack.client, {
-            channel: ownerDm,
-            text: headline,
-            mrkdwn: true,
-            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: bodyLines.join('\n') } }],
-          });
+            await postMessageWithFeedback(slack.client, {
+              channel: ownerDm,
+              text: finalSummary,
+              mrkdwn: true,
+              blocks: [{ type: 'section', text: { type: 'mrkdwn', text: bodyLines.join('\n') } }],
+            });
+          }
         }
 
         refreshOwnerHome(slack.client, ownerId, {
@@ -165,13 +185,14 @@ export function recordProgressFunction(): RegisteredFunction {
 
       return {
         status: 'success',
-        message: `Recorded progress for "${updated.title}" — ${updated.status}, ${updated.progressPercent}%.`,
+        message: 'Progress recorded.',
         data: {
           taskId: updated.id,
           title: updated.title,
           status: updated.status,
           progressPercent: updated.progressPercent,
           summary: finalSummary,
+          reportedBy,
           action: 'progress_recorded',
         },
       };

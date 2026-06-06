@@ -109,12 +109,16 @@ export function createTaskFunction(): RegisteredFunction {
             prisma,
             teamId: context.slack.teamId ?? null,
             enterpriseId: context.slack.enterpriseId ?? null,
+            speakerUserId: context.slack.userId,
           });
           if (result.kind === 'resolved') {
             resolvedAssignee = result.slackUserId;
             if (result.autoLearned) {
-              // Phrasing for the owner so they can correct if we guessed wrong.
-              resolverNote = `I matched "${queryStr}" to <@${result.slackUserId}> from the workspace. Tell me if I picked the wrong person.`;
+              // Structured signal to the orchestrator — let it phrase the
+              // confirmation in the workspace's voice + language. Storing the
+              // exact English prose here would force the AI to quote it
+              // verbatim (and leak English into Chinese workspaces).
+              resolverNote = `auto-learned:${queryStr}:${result.slackUserId}`;
             }
           } else if (result.kind === 'needs_disambiguation') {
             disambiguation = result.candidates;
@@ -128,23 +132,28 @@ export function createTaskFunction(): RegisteredFunction {
           // same channel so the owner sees ONE coherent reply instead of "✅ done… oh wait,
           // who exactly?". Per red line #2: confirm once, then remember.
           const queryStr = (args.assigneeQuery || primaryAssignee || '').trim();
+          // Decide language from the disambiguation candidates' display names
+          // + the speaker query; the speaker said the query word, so it's the
+          // most reliable language signal.
+          const sampleTexts = [queryStr, ...disambiguation.map((c) => c.display)];
+          const isZh = /[一-鿿]/.test(sampleTexts.join(' '));
           const candidateLines = disambiguation
             .map((c, i) => `${i + 1}. <@${c.slackUserId}> — ${c.display}`)
             .join('\n');
+          const header = isZh
+            ? `"${queryStr}" 有好几位 — 是哪个?`
+            : `which "${queryStr}" did you mean?`;
+          const hint = isZh
+            ? `_回复数字 / @ / 名字都行,以后记下来。_`
+            : `_reply with a number, an @, or the name — I'll remember next time._`;
           await context.slack.send({
-            text: `Which "${queryStr}" did you mean?`,
+            text: header,
             blocks: [
               {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: [
-                    `❓ I see more than one *"${queryStr}"* in your workspace. Which one?`,
-                    ``,
-                    candidateLines,
-                    ``,
-                    `_Just reply with the number, the @-mention, or the name. I'll remember next time._`,
-                  ].join('\n'),
+                  text: [header, '', candidateLines, '', hint].join('\n'),
                 },
               },
             ],
@@ -170,8 +179,9 @@ export function createTaskFunction(): RegisteredFunction {
         }
         return {
           status: 'error',
-          message:
-            'No assignee resolved. If you have a name/nickname the owner said, retry with assigneeQuery=<that string>. Only if truly nothing in context, call [AskClarification].',
+          // The tool description already tells the AI when to use AskClarification —
+          // this runtime message just signals the failure cleanly.
+          message: 'Could not resolve an assignee from the input.',
         };
       }
 

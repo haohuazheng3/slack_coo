@@ -32,12 +32,12 @@ export function nudgeProgressFunction(): RegisteredFunction {
 
       const task = await prisma.task.findUnique({ where: { id: taskId } });
       if (!task) {
-        return { status: 'error', message: `Task ${taskId} not found.` };
+        return { status: 'error', message: 'Task not found.' };
       }
       if (task.status === 'COMPLETED' || task.status === 'CANCELLED') {
         return {
           status: 'error',
-          message: `Task ${taskId} is already ${task.status.toLowerCase()}, no nudge needed.`,
+          message: 'Task is already closed; no nudge needed.',
         };
       }
 
@@ -58,61 +58,52 @@ export function nudgeProgressFunction(): RegisteredFunction {
         locale: lang,
       });
       const ownerMention = toSlackMention(task.initiator || task.createdBy);
+      const reason = args.reason ?? 'scheduled';
 
-      const headerByReason: Record<string, string> = {
-        scheduled: `👋 Quick check-in`,
-        pre_due: `⏰ Heads up — due soon`,
-        overdue: `⏰ This was due ${dueText}`,
-        owner_requested: `👋 ${ownerMention} asked how this is going`,
-      };
-      const header = headerByReason[args.reason ?? 'scheduled'] ?? '👋 Quick check-in';
+      // Flowing one-sentence DM instead of a bolded title + 📅 due + 📝 description
+      // mini-card. The assignee sees a teammate's note, not a notification widget.
+      // Locale-aware throughout — Chinese workspace gets Chinese end-to-end.
+      const bodyText = args.customMessage?.trim() || buildNudgeBody({
+        lang,
+        reason,
+        title: task.title,
+        description: task.description ?? null,
+        dueText,
+        ownerMention,
+      });
 
-      // Per product brief §2.4: low-friction, casual phrasing. We're a teammate asking
-      // "how's it going", NOT a manager demanding a status report. A short reply is enough —
-      // the bot does the translation to owner-language.
-      const introLine =
-        args.customMessage?.trim() ||
-        `How's it going? A one-liner is plenty — "on track" / "halfway" / "blocked on X" works. I'll handle the translation for ${ownerMention}.`;
+      // Buttons only on overdue / owner_requested — for routine check-ins, the
+      // affordance gets in the way; the assignee can just reply naturally.
+      const showButtons = reason === 'overdue' || reason === 'owner_requested';
+      const blocks: any[] = [
+        { type: 'section', text: { type: 'mrkdwn', text: bodyText } },
+      ];
+      if (showButtons) {
+        blocks.push({
+          type: 'actions',
+          elements: [
+            {
+              // Emoji-only button labels — work across languages without us picking one.
+              type: 'button',
+              text: { type: 'plain_text', text: '✅' },
+              style: 'primary',
+              action_id: 'progress_task_completed',
+              value: task.id,
+            },
+            {
+              type: 'button',
+              text: { type: 'plain_text', text: '⛔' },
+              action_id: 'progress_task_blocked',
+              value: task.id,
+            },
+          ],
+        });
+      }
 
       await postMessageWithFeedback(slack.client, {
         channel: dmChannel,
-        text: `${header}: ${task.title}`,
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: [
-                `${header}`,
-                `*${task.title}*`,
-                task.description ? `📝 ${task.description}` : '',
-                `📅 Due: ${dueText}`,
-                ``,
-                introLine,
-              ]
-                .filter(Boolean)
-                .join('\n'),
-            },
-          },
-          {
-            type: 'actions',
-            elements: [
-              {
-                type: 'button',
-                text: { type: 'plain_text', text: '✅ Mark complete' },
-                style: 'primary',
-                action_id: 'progress_task_completed',
-                value: task.id,
-              },
-              {
-                type: 'button',
-                text: { type: 'plain_text', text: '⛔ I am blocked' },
-                action_id: 'progress_task_blocked',
-                value: task.id,
-              },
-            ],
-          },
-        ],
+        text: bodyText,
+        blocks,
       });
 
       const now = new Date();
@@ -143,9 +134,55 @@ export function nudgeProgressFunction(): RegisteredFunction {
 
       return {
         status: 'success',
-        message: `Nudged ${toSlackMention(task.assignee)} for status on "${task.title}".`,
+        message: 'Nudge sent.',
         data: { taskId, assignee: task.assignee, channel: dmChannel, reason: args.reason },
       };
     },
   };
+}
+
+/**
+ * Compose the assignee DM as one flowing sentence rather than a stacked
+ * "header / *title* / 📅 Due / intro" card. Each reason gets a slightly
+ * different opener so the same person doesn't get the identical line every
+ * scheduled check-in.
+ */
+function buildNudgeBody(args: {
+  lang: 'en' | 'zh';
+  reason: 'scheduled' | 'pre_due' | 'overdue' | 'owner_requested';
+  title: string;
+  description: string | null;
+  dueText: string;
+  ownerMention: string;
+}): string {
+  const { lang, reason, title, description, dueText, ownerMention } = args;
+  const ctx = description ? (lang === 'zh' ? `(背景:${description})` : `(context: ${description})`) : '';
+  const tail =
+    lang === 'zh'
+      ? `一两句就够 — 在做 / 一半 / 卡在 X / 做完了 都行,我帮你跟 ${ownerMention} 同步。`
+      : `One line is plenty — "on it" / "halfway" / "blocked on X" / "done" — I'll handle the loop back to ${ownerMention}.`;
+
+  if (lang === 'zh') {
+    switch (reason) {
+      case 'pre_due':
+        return `提醒一下,《${title}》${dueText} 之前要 ${ctx}\n${tail}`;
+      case 'overdue':
+        return `《${title}》${dueText} 已经到期了 ${ctx}\n${tail}`.trim();
+      case 'owner_requested':
+        return `${ownerMention} 想了解一下《${title}》进展如何 ${ctx}\n${tail}`.trim();
+      default:
+        return `《${title}》这边进展怎样? ${dueText} 之前要 ${ctx}\n${tail}`.trim();
+    }
+  }
+
+  switch (reason) {
+    case 'pre_due':
+      return `Heads up — "${title}" is due ${dueText} ${ctx}\n${tail}`.trim();
+    case 'overdue':
+      return `Just flagging — "${title}" was due ${dueText} ${ctx}\n${tail}`.trim();
+    case 'owner_requested':
+      return `${ownerMention} asked how "${title}" is going ${ctx}\n${tail}`.trim();
+    default:
+      return `Quick one — how's "${title}" going? Due ${dueText} ${ctx}\n${tail}`.trim();
+  }
 }

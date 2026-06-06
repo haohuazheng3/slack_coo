@@ -268,7 +268,10 @@ app.event('app_mention', async ({ event, client, context }) => {
 });
 
 app.message(async ({ message, client, context }) => {
-  if ((message as any).subtype) return;
+  // Allow file_share through so deliverable uploads ("here's the banner") reach
+  // the orchestrator. Drop other subtypes (joins / leaves / edits / pins).
+  const subtype = (message as any).subtype as string | undefined;
+  if (subtype && subtype !== 'file_share') return;
   if ((message as any).bot_id) return;
 
   const userId = (message as any).user as string | undefined;
@@ -276,8 +279,39 @@ app.message(async ({ message, client, context }) => {
   const text = (message as any).text as string | undefined;
   const ts = (message as any).ts as string | undefined;
   const threadTs = (message as any).thread_ts as string | undefined;
+  const files = (message as any).files as Array<any> | undefined;
+  const hasFiles = Array.isArray(files) && files.length > 0;
 
-  if (!userId || !channelId || !text) return;
+  // Allow file-share messages with no caption text. text must be a string for
+  // downstream code, default to empty.
+  const normalizedText = (text ?? '').toString();
+  if (!userId || !channelId) return;
+  if (!normalizedText && !hasFiles) return;
+
+  // Cheap noise filter: a pure-emoji / pure-punctuation / single-character
+  // reply ("👀", "👍", "ok", ".") doesn't deserve an Opus inference. The owner
+  // gets routed straight to the orchestrator below, so without this filter
+  // every reaction-style ping burns tokens for no value.
+  const trimmedText = normalizedText.trim();
+  if (!hasFiles && trimmedText.length <= 3 && /^[\p{P}\p{S}\p{Z}\p{Emoji}\s]*$/u.test(trimmedText)) {
+    return;
+  }
+
+  // Compose the text the orchestrator sees: caption + a description of the
+  // file(s) attached so the AI can interpret "稿子在这里" + uploaded.png as
+  // a likely delivery without needing a separate channel for file metadata.
+  let effectiveText = normalizedText;
+  if (hasFiles) {
+    const fileDescriptions = files!
+      .map((f: any) => {
+        const name = f.name || f.title || 'file';
+        const mime = f.mimetype ? ` (${f.mimetype})` : '';
+        return `${name}${mime}`;
+      })
+      .join(', ');
+    const fileLine = `[attached: ${fileDescriptions}]`;
+    effectiveText = normalizedText ? `${normalizedText}\n${fileLine}` : fileLine;
+  }
 
   const teamId = context.teamId ?? null;
   const enterpriseId = context.enterpriseId ?? null;
@@ -289,7 +323,7 @@ app.message(async ({ message, client, context }) => {
   // runs twice and we end up creating duplicate tasks etc.
   if (!isDm) {
     const botUid = context.botUserId ?? (await getBotUserId(teamId, enterpriseId));
-    if (botUid && text.includes(`<@${botUid}>`)) return;
+    if (botUid && normalizedText.includes(`<@${botUid}>`)) return;
   }
 
   // Belt-and-suspenders dedupe for Slack at-least-once retries and any
@@ -300,7 +334,7 @@ app.message(async ({ message, client, context }) => {
   }
 
   if (isDm && isAwaitingReasonFromUser(userId)) {
-    const handled = await consumeReasonReply(userId, channelId, text, client);
+    const handled = await consumeReasonReply(userId, channelId, normalizedText, client);
     if (handled) return;
   }
 
@@ -315,7 +349,7 @@ app.message(async ({ message, client, context }) => {
       enterpriseId,
       threadTs,
       fallbackTs: ts,
-      text,
+      text: effectiveText,
       triggerHint: 'dm',
     });
     return;
@@ -335,7 +369,7 @@ app.message(async ({ message, client, context }) => {
         enterpriseId,
         threadTs,
         fallbackTs: ts,
-        text,
+        text: effectiveText,
         triggerHint: 'thread_followup',
       });
       return;
@@ -359,7 +393,7 @@ app.message(async ({ message, client, context }) => {
       enterpriseId,
       threadTs,
       fallbackTs: ts,
-      text,
+      text: effectiveText,
       triggerHint: 'owner_channel_speech',
     });
     return;
@@ -376,7 +410,7 @@ app.message(async ({ message, client, context }) => {
       enterpriseId,
       channelId,
       speakerUserId: userId,
-      text,
+      text: effectiveText,
       isSelf: botUserId ? userId === botUserId : false,
       botUserId,
     });
@@ -397,7 +431,7 @@ app.message(async ({ message, client, context }) => {
     enterpriseId,
     threadTs,
     fallbackTs: ts,
-    text,
+    text: effectiveText,
     triggerHint: `ambient:${gate.why}`,
   });
 });

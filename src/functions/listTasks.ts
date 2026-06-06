@@ -19,13 +19,15 @@ export function listTasksFunction(): RegisteredFunction {
       const message = await buildTaskListMessage(context.prisma, targetUserId, {
         showCompleted: scope === 'completed',
         showAll: scope === 'all',
+        teamId: context.slack.teamId ?? null,
+        enterpriseId: context.slack.enterpriseId ?? null,
       });
 
       await context.slack.send(message);
 
       return {
         status: 'success',
-        message: `Listed ${scope} tasks for user ${targetUserId}.`,
+        message: 'Task list shown.',
         data: { scope, userId: targetUserId, action: 'listed' },
       };
     },

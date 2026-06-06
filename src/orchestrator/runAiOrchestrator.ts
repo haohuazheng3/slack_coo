@@ -94,9 +94,16 @@ async function executeOneCall(
 
   const taskIdNeeded = ['UpdateTaskDetails', 'UpdateTaskStatus', 'DeleteTask', 'RecordProgress', 'NudgeProgress'];
   if (taskIdNeeded.includes(fn.name) && !parsedArgs.taskId) {
-    const latest = findLatestToolResult(messages);
-    if (latest?.data?.taskId) {
-      parsedArgs.taskId = latest.data.taskId;
+    // Only auto-fill if the AI didn't pass an explicit query — never clobber a
+    // FindTask-style intent ("find the banner one") with a stale id from a
+    // previous unrelated tool result. The AI is explicitly looking up a task
+    // by name; let it.
+    const hasExplicitQuery = parsedArgs.titleQuery || parsedArgs.taskQuery || parsedArgs.query;
+    if (!hasExplicitQuery) {
+      const latest = findLatestToolResult(messages);
+      if (latest?.data?.taskId) {
+        parsedArgs.taskId = latest.data.taskId;
+      }
     }
   }
 
@@ -111,11 +118,14 @@ async function executeOneCall(
       data: result.data,
     };
   } catch (error: any) {
+    // Log the raw exception text for ops; do NOT put it into the AI buffer.
+    // Stack traces / SQL errors / typescript runtime messages leaking into the
+    // conversation context risks them being quoted back at the user.
     log.error(`Tool ${fn.name} threw`, { error: error?.message ?? String(error) });
     return {
       name: fn.name,
       status: 'error',
-      message: error?.message ?? 'Unknown error',
+      message: 'The tool threw while running.',
     };
   }
 }

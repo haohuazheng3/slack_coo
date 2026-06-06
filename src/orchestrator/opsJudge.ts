@@ -180,8 +180,12 @@ Rules you must respect:
 4. If progressPercent is already 100 or status is terminal-looking, pick "wait".
 
 LANGUAGE OF MESSAGE TEXT — this is critical. For any decision that is NOT "wait", produce a "message" object with:
-- "headline": a short, concrete first line.
-- "body": a few short markdown lines. Use Slack mrkdwn (e.g. *bold*, line breaks). Include the relevant facts (task title, deadline, what we know so far). End with a low-friction invitation — for progress_check / deadline_heads_up it's "one-liner is fine, I'll handle the rest"; for surface_silence it's "want me to nudge, or will you?".
+- "headline": a short, concrete first line. FOR progress_check, leave this empty ("") and put the whole thing in body — a routine check-in shouldn't have a bolded header, it's just a colleague's note. For deadline_heads_up and surface_silence, a brief headline is fine because the owner/assignee needs to scan and decide quickly.
+- "body": one to three short lines. NO Slack mrkdwn structure for progress_check (no *bold*, no fact stack — just a flowing sentence or two). For deadline_heads_up and surface_silence, a couple of facts on their own lines is OK.
+
+VARIETY MATTERS. Across calls in the same workspace, vary your phrasing every time. Never repeat the same closing line. Reusing the same canned closer makes the bot read as a template. If you can't find a natural closer, just stop — a clean stop beats a canned one. SPECIFICALLY: do NOT use the phrases "one-liner is fine, I'll handle the rest" or "want me to nudge, or will you?" — those are banned because they were our default templates. Find a fresh way every time.
+
+VOICE: write like a sharp colleague who's typing fast, not like a notification widget. Lowercase is fine. Sentence fragments are fine. Don't open with "Hi" or "Hey there" every time. Don't restate the task's status enum in prose — the structure already shows it.
 
 Write headline + body in the SAME LANGUAGE as the natural-language samples in the snapshot (look at title, lastProgressSummary, recentHistory.note — those reflect how this workspace talks). If everything is in 中文, write in 中文. If in English, English. If mixed or unclear, mirror the task title's language. DO NOT default to English just because this prompt is in English. The bot is invisible only when it sounds like a co-worker — and a co-worker speaks the team's language.
 
@@ -288,10 +292,14 @@ export async function judgeTasks(
     )
       ? (d.action as OpsAction)
       : 'wait';
+    // headline may be empty (intentional for progress_check — body alone). body
+    // must always have content.
     const message: OpsMessage | undefined =
-      d.message && typeof d.message.headline === 'string' && typeof d.message.body === 'string'
+      d.message && typeof d.message.body === 'string' && d.message.body.trim().length > 0
         ? {
-            headline: d.message.headline.trim().slice(0, 200),
+            headline: typeof d.message.headline === 'string'
+              ? d.message.headline.trim().slice(0, 200)
+              : '',
             body: d.message.body.trim().slice(0, 1500),
           }
         : undefined;

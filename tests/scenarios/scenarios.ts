@@ -935,6 +935,165 @@ export async function scenarioBulkDeleteAllExcept(): Promise<ScenarioResult> {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW SCENARIO STUBS — codify expected post-refactor behavior.
+//
+// These are *intentionally* not in ALL_SCENARIOS yet — they describe the
+// expected behavior added by the naturalness pass (2026-06) but haven't been
+// run against the live API. When you want to verify, drop them into the
+// registry, run `npm run scenarios`, and triage any reds.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Bare ack does not fabricate progress.
+ *
+ * Setup: open task at progressPercent=null. Send assignee DM "ok" (and "好的",
+ * "稍等", "on it" each separately).
+ *
+ * Assert:
+ *   - progressPercent unchanged (still null/0)
+ *   - status unchanged
+ *   - NO owner DM was sent for these replies
+ *   - assignee got a short return-nod in matching language
+ *   - lastProgressAt was updated (we did see them)
+ *   - RecordProgress returned action='acknowledged' OR was not called at all
+ */
+export const scenarioVagueAckDoesNotFabricateProgress = null;
+
+/**
+ * Owner reports on behalf of assignee.
+ *
+ * Setup: open task assigned to Lisa with progress=30%. Owner DM:
+ * "Lisa 跟我当面说她已经搞定了".
+ *
+ * Assert:
+ *   - RecordProgress was called with reportedBy='owner'
+ *   - task.status = COMPLETED
+ *   - NO confirmation DM was sent BACK to the owner about their own statement
+ *   - Lisa (assignee) DID get a short FYI DM ("<owner> 那边说《X》完成了…")
+ *   - The progressUpdate row's source is 'owner_reported_for_employee'
+ */
+export const scenarioOwnerReportsOnBehalfOfAssignee = null;
+
+/**
+ * No post-tool narration in replies.
+ *
+ * Setup: 10 varied owner utterances that each trigger one of
+ * CreateTask / UpdateTaskStatus / DeleteTask / RecordProgress / DeleteTasks.
+ *
+ * Assert: the user-visible reply text NEVER matches these banned standalone
+ * narration patterns:
+ *   /^(Task created|Created task|Done|Marked|Updated|Deleted|已创建|已删除|已更新|已完成|已取消)[.。!! ]?$/
+ * The orchestrator's reply should either add new information (heads-up,
+ * follow-up question) or be empty. Empty is valid.
+ */
+export const scenarioNoPostToolNarration = null;
+
+/**
+ * Self-assignment via "me" / "我".
+ *
+ * Setup: owner sends "remind me to follow up with the vendor on Friday 3pm".
+ *
+ * Assert:
+ *   - exactly 1 task created
+ *   - task.assignee === speaker's userId (NOT a fabricated user, NOT null)
+ *   - no AskClarification was emitted asking "who?"
+ *   - deadline = Friday 15:00 in owner's TZ
+ *
+ * Plus the Chinese mirror: "提醒我下周三 review 这个" → assignee = owner.
+ */
+export const scenarioSelfAssignmentMeOrWo = null;
+
+/**
+ * FindTask called before guessing.
+ *
+ * Setup: seed 8 open tasks for the owner, including one titled "Q4 launch
+ * banner". Owner asks "banner 进展如何?" (no recent ToolResult breadcrumb
+ * with a taskId).
+ *
+ * Assert:
+ *   - FindTask was called with titleQuery containing "banner"
+ *   - ListTasks was NOT called (we don't dump all 8)
+ *   - reply references the banner task specifically (uses its
+ *     lastProgressSummary or current status)
+ *   - reply has NO bolded headline + fact list (≤ 2 sentences flow)
+ */
+export const scenarioFindTaskBeforeGuessing = null;
+
+/**
+ * opsJudge closer variety.
+ *
+ * Setup: generate 10 ambient DMs across different (task, reason) pairs from
+ * opsJudge.judgeTasks (real API call). Collect the last 1-2 sentences of each
+ * body.
+ *
+ * Assert:
+ *   - No two messages end with the same closing line
+ *   - Specifically forbid: "one-liner is fine, I'll handle the rest" /
+ *     "want me to nudge, or will you?" / "I'll loop back the moment they
+ *     reply" appearing in more than one message of the batch
+ */
+export const scenarioOpsJudgeCloserVariety = null;
+
+/**
+ * No card stack from ListTasks tool.
+ *
+ * Setup: seed 6 open tasks for the owner. Owner says "show me my tasks"
+ * (DM and channel).
+ *
+ * Assert on captured chat.postMessage blocks:
+ *   - AT MOST 1 section block + at most 1 actions block (the dashboard link)
+ *   - NO `📅 Due:` / `Assignee:` label substrings
+ *   - NO divider blocks between per-task sections
+ *   - NO per-task action buttons (task_mark_complete, task_delete) in the
+ *     chat post
+ *   - Same shape after clicking the 'list_tasks' action button
+ */
+export const scenarioNoCardStackFromListTasks = null;
+
+/**
+ * AskClarification has no widget UI.
+ *
+ * Setup: owner sends a deliberately ambiguous instruction with two missing
+ * fields (assignee + dueTime).
+ *
+ * Assert on captured chat.postMessage:
+ *   - blocks.length === 1 (single section)
+ *   - NO "I need a bit more info" / "建任务前还需要你补一下" preamble
+ *   - NO "Draft so far" / "Missing:" context blocks
+ *   - the text is just the AI's natural-language question
+ */
+export const scenarioAskClarificationNoWidget = null;
+
+/**
+ * Language coherence under button press.
+ *
+ * Setup: seed a task with Chinese title and description. Trigger each button:
+ * task_mark_complete, task_delete, progress_task_completed,
+ * progress_task_blocked, silence_nudge_assignee, silence_owner_handles.
+ *
+ * Assert: the resulting chat.postMessage / postEphemeral text contains NO
+ * Latin-letter words (other than user mentions) and matches a Chinese
+ * template. Specifically forbid the substrings: 'Marked', 'Deleted',
+ * 'Thanks, recorded', 'I will', 'I just nudged', 'leaving it with you'.
+ */
+export const scenarioChannelLanguageCoherenceUnderButton = null;
+
+/**
+ * file_share triggers completion-detection path.
+ *
+ * Setup: send an assignee DM with subtype=file_share, file attached, text
+ * "稿子在这里 看一下", linked to an open banner task.
+ *
+ * Assert:
+ *   - the orchestrator was invoked (NOT silently dropped)
+ *   - RecordProgress was called with status=COMPLETED OR a relay DM to the
+ *     owner asks for confirmation
+ *   - the orchestrator saw the file metadata in its input text
+ *     ([attached: <filename>...] appears in the user payload)
+ */
+export const scenarioFileUploadTriggersCompletionDetection = null;
+
 // ─────────── registry ───────────
 
 export const ALL_SCENARIOS = [

@@ -128,7 +128,7 @@ type CommonKey =
 
 const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
   en: {
-    'home.title': '📊 Aiptima — Operations Dashboard',
+    'home.title': 'Your board',
     'home.hint':
       '_Just DM me or @-mention me in a channel. Talk to me like a teammate — I\'ll figure out the structure, follow up with the team, and surface what you need to see._',
     'home.openInBrowser': '🌐 Open full dashboard',
@@ -147,7 +147,7 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'home.group.completed': '✅ Completed (recent)',
     'home.group.other': '🗂 Other (cancelled / failed)',
     'home.empty':
-      '🎉 _Nothing on the board yet. DM me or @-mention me anywhere — e.g._ `@Aiptima ask Luna to finalize the Q4 deck by Friday EOD.`',
+      '🎉 _nothing here yet. DM me or @-mention me anywhere — e.g._ `ask Luna to finalize the Q4 deck by Friday EOD.`',
     'card.due': 'Due',
     'card.assignee': 'Assignee',
     'card.from': 'From',
@@ -172,7 +172,7 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'onboarding.body':
       'Just talk to me. DM me directly, or @-mention me in any channel. No forms, no roster to enroll, no project-management software to learn. I\'ll figure out the structure (who, what, when) and follow up with the team on your behalf.',
     'onboarding.example1':
-      '• `@Aiptima have Lisa do the launch banner this week` — I\'ll find Lisa, pick a default deadline, and DM her with context.',
+      '• `have Lisa do the launch banner this week` — I\'ll find Lisa, pick a default deadline, and DM her with context.',
     'onboarding.example2':
       '• `ask the design team for a new logo, urgent` — I\'ll ask which designer if I\'m not sure, and remember the answer.',
     'onboarding.example3':
@@ -181,7 +181,7 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
       'I never characterize people\'s performance — I just show you the facts and hand the call back to you. The team only ever hears from me in DM.',
   },
   zh: {
-    'home.title': '📊 Aiptima — 任务运营看板',
+    'home.title': '你的看板',
     'home.hint':
       '_直接 DM 我或在任意频道 @ 我。说人话就行——我来拆任务、跟员工对齐、把进度（包括沉默）按你想看到的方式呈现。_',
     'home.openInBrowser': '🌐 打开完整看板',
@@ -200,7 +200,7 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'home.group.completed': '✅ 最近完成',
     'home.group.other': '🗂 其他（已取消 / 未完成）',
     'home.empty':
-      '🎉 _暂无任务。直接 DM 我或在频道 @ 我，例如：_ `@Aiptima 让 Luna 在周五下班前完成 Q4 方案`',
+      '🎉 _暂无任务。直接 DM 我或在频道 @ 我,例如:_ `让 Luna 在周五下班前完成 Q4 方案`',
     'card.due': '截止',
     'card.assignee': '负责人',
     'card.from': '发起人',
@@ -225,7 +225,7 @@ const COMMON: Record<SupportedLanguage, Record<CommonKey, string>> = {
     'onboarding.body':
       '直接跟我说话就行。在 DM 里找我，或在任意频道 @ 我。不用填表、不用录花名册、不用学项目管理软件。我会自己拆任务（谁、什么、什么时候），并替你去跟员工对齐。',
     'onboarding.example1':
-      '• `@Aiptima 让 Lisa 这周出个发布 banner` — 我会找到 Lisa、默认一个截止时间，并把背景同步给她。',
+      '• `让 Lisa 这周出个发布 banner` — 我会找到 Lisa、默认一个截止时间,并把背景同步给她。',
     'onboarding.example2':
       '• `让设计那边出个新 logo，紧急` — 不确定是哪位的话我会问一次，并把答案记下来下次不再问。',
     'onboarding.example3':

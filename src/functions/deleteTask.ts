@@ -24,25 +24,26 @@ export function deleteTaskFunction(): RegisteredFunction {
       try {
         existing = await context.prisma.task.findUnique({ where: { id: taskId } });
         if (!existing) {
-          return { status: 'error', message: `Task ${taskId} not found.` };
+          return { status: 'error', message: 'Task not found.' };
         }
         await context.prisma.task.delete({ where: { id: taskId } });
       } catch (error: any) {
         return {
           status: 'error',
-          message: error?.message ?? 'Failed to delete task.',
+          message: 'Could not delete the task.',
         };
       }
 
-      await context.slack.send(`🗑️ Deleted task *${existing.title}*.`);
-
+      // No "🗑️ Deleted task X" banner — the orchestrator's natural reply
+      // covers it. The banner pattern was making deletion feel like a system
+      // event, not "ok, dropped that one."
       const ownerId = existing.initiator || existing.createdBy;
       if (ownerId) refreshOwnerHome(context.slack.client, ownerId).catch(() => undefined);
 
       return {
         status: 'success',
-        message: `Deleted task "${existing.title}".`,
-        data: { taskId, action: 'deleted' },
+        message: 'Task deleted.',
+        data: { taskId, taskTitle: existing.title, action: 'deleted' },
       };
     },
   };

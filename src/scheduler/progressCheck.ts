@@ -129,36 +129,42 @@ async function dmAssignee(decision: OpsDecision, task: Task, slackClient: any) {
 
   const { headline, body } = decision.message!;
 
-  // We render only structure here — text comes from the LLM in the workspace language.
-  // The buttons are functional widgets; their action_ids are matched server-side, so
-  // their labels can stay short and emoji-led to be roughly language-neutral.
+  // Routine progress_check DMs render the body alone — no bolded headline, no
+  // widget shape. For deadline_heads_up, the LLM may provide a headline; we
+  // render it bold on its own line so it scans. Buttons appear only on
+  // deadline_heads_up (one-tap matters there); routine check-ins let the
+  // assignee reply naturally.
+  const isRoutine = decision.action === 'progress_check';
+  const renderedText = isRoutine || !headline ? body : `*${headline}*\n${body}`;
+
+  const blocks: any[] = [
+    { type: 'section', text: { type: 'mrkdwn', text: renderedText } },
+  ];
+  if (!isRoutine) {
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '✅' },
+          style: 'primary',
+          action_id: 'progress_task_completed',
+          value: task.id,
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '⛔' },
+          action_id: 'progress_task_blocked',
+          value: task.id,
+        },
+      ],
+    });
+  }
+
   await postMessageWithFeedback(slackClient, {
     channel: dmChannel,
-    text: headline,
-    blocks: [
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*${headline}*\n${body}` },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '✅' },
-            style: 'primary',
-            action_id: 'progress_task_completed',
-            value: task.id,
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '⛔' },
-            action_id: 'progress_task_blocked',
-            value: task.id,
-          },
-        ],
-      },
-    ],
+    text: headline || body.slice(0, 80),
+    blocks,
   });
 
   const now = new Date();

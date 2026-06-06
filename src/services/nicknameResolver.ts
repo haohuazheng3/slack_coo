@@ -31,6 +31,8 @@ type ResolveContext = {
   prisma: PrismaClient;
   teamId: string | null;
   enterpriseId: string | null;
+  /** The Slack user id of whoever is talking — enables "me" / "我" → self resolution. */
+  speakerUserId?: string;
 };
 
 export type ResolvedCandidate = {
@@ -151,6 +153,19 @@ export async function resolveAssignee(
   const raw = (input ?? '').trim();
   if (!raw) return { kind: 'not_found' };
 
+  // ── Layer 0: self-reference ("me", "myself", "我", "我自己", "i") ────────────
+  // Owner saying "remind me to follow up" or "提醒我下周三 review 这个" should
+  // resolve to the speaker themselves — never get sent through Slack profile
+  // matching where it could collide with someone named "me" or "I".
+  if (ctx.speakerUserId && /^(me|myself|i|我|我自己|本人)$/i.test(raw)) {
+    return {
+      kind: 'resolved',
+      slackUserId: ctx.speakerUserId,
+      source: 'mention',
+      autoLearned: false,
+    };
+  }
+
   // ── Layer 1: direct Slack mention or bare user id ────────────────────────────
   const directId = extractUserId(raw);
   if (directId) {
@@ -187,7 +202,8 @@ export async function resolveAssignee(
           return {
             slackUserId: h.slackUserId,
             display: m ? memberDisplay(m) : h.slackUserId,
-            reason: `previous alias (confidence ${h.confidence})`,
+            // No raw confidence numbers in user-facing reasons — semantic label only.
+            reason: h.confidence >= 100 ? 'previously confirmed' : 'previously inferred',
           };
         })
         .slice(0, 5);

@@ -4,12 +4,39 @@ import { createLogger } from '../lib/logger';
 
 const log = createLogger('AiSummarizer');
 
+/**
+ * "ACKNOWLEDGED" is a synthetic interpretation status that lives only in this
+ * module — it never reaches Prisma. It signals "the reply is a bare ack with
+ * no progress info, don't fabricate a percent or DM the owner about it".
+ */
+export type InterpretationStatus = TaskStatus | 'ACKNOWLEDGED';
+
 export type EmployeeProgressInterpretation = {
-  status: TaskStatus;
-  progressPercent: number;
-  ownerSummary: string;
+  status: InterpretationStatus;
+  /** null when status === 'ACKNOWLEDGED' — we don't fabricate a number. */
+  progressPercent: number | null;
+  /** null when status === 'ACKNOWLEDGED' — no DM goes to the owner. */
+  ownerSummary: string | null;
   blocker?: string;
 };
+
+// A bare acknowledgment is not progress. "好的" / "ok" / "收到" / "稍等" from an
+// assignee in response to a NudgeProgress means "I heard you" — it doesn't mean
+// they started, or that they're 50% done. Previously we'd send the LLM and it
+// would dutifully invent IN_PROGRESS + 50% for these, then DM the owner
+// "Luna started on banner — 50%". That's fabricated progress; it violates the
+// "facts only" red line and floods the owner with false updates. Short-circuit
+// before the LLM ever sees them.
+const BARE_ACK_PATTERNS = new Set([
+  'ok', 'okay', 'k', 'kk', 'sure', 'yep', 'yes', 'yeah', 'on it', 'got it', 'noted',
+  '好', '好的', '收到', '行', '嗯', '稍等', '马上', '在做', '知道了', '了解', '明白', '是的', '对', '可以',
+]);
+function isBareAck(reply: string): boolean {
+  const t = reply.trim().toLowerCase().replace(/[。.！!？?,，~～\s]+$/g, '');
+  if (t.length === 0) return true;
+  if (t.length <= 4) return true;
+  return BARE_ACK_PATTERNS.has(t);
+}
 
 const SYSTEM_PROMPT = `You are an executive assistant. Given an employee's free-form Slack reply about a task, produce a structured JSON object the owner can scan in 1 second.
 
@@ -49,6 +76,17 @@ export async function interpretEmployeeProgress(args: {
   previousSummary?: string | null;
   employeeReply: string;
 }): Promise<EmployeeProgressInterpretation> {
+  // Short-circuit on bare acks BEFORE hitting the LLM. Saves a model call AND
+  // (more importantly) prevents the model from fabricating progress numbers
+  // for "ok" / "好的".
+  if (isBareAck(args.employeeReply)) {
+    return {
+      status: 'ACKNOWLEDGED',
+      progressPercent: null,
+      ownerSummary: null,
+    };
+  }
+
   const userPayload = {
     task: {
       title: args.taskTitle,
@@ -104,6 +142,13 @@ function normalizeInterpretation(
     blocker: parsed.blocker?.trim() || undefined,
   };
 }
+
+/**
+ * Re-export the bare-ack test so RecordProgress can mirror the gate at its
+ * own layer (e.g. for tests, or if a future call site wants to know "is this
+ * even worth recording").
+ */
+export const isAcknowledgmentOnly = isBareAck;
 
 function heuristicInterpretation(reply: string): EmployeeProgressInterpretation {
   // Last-resort fallback if the LLM is unavailable. Language-aware where it can be,
