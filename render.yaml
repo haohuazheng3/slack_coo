@@ -33,4 +33,28 @@ services:
       - key: DEFAULT_TIMEZONE
         value: America/New_York
       - key: OPS_JUDGE_CRON
-        value: "*/15 * * * *"
+        value: "*/20 * * * *"
+
+      # ─── Stripe billing ────────────────────────────────────────────────
+      # All sync:false — set in the Render dashboard, never committed.
+      # Without these, the billing routes 503 and the bot stays in "billing
+      # disabled" mode (everyone gets full access — safe default for rollout).
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: STRIPE_PORTAL_CONFIGURATION_ID
+        sync: false
+      - key: BILLING_TOKEN_SECRET
+        sync: false
+      # ISO-8601 UTC timestamp captured once at launch. Used by the migration
+      # backfill to grandfather pre-launch installs.
+      - key: MONETIZATION_LAUNCH_CUTOFF
+        sync: false
+      # Monthly USD price for the Pro plan. Shown on /billing and in Slack DMs.
+      - key: BILLING_PRICE_USD_MONTHLY
+        value: "99"
+      - key: BILLING_GRACE_DAYS
+        value: "7"

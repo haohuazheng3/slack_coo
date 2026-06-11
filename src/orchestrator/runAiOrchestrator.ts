@@ -10,6 +10,7 @@ import { ConversationMessage } from './conversationStore';
 import { extractFunctionCalls, ParsedFunctionCall } from './parseAiResponse';
 import { createLogger } from '../lib/logger';
 import { getUserProfile } from '../lib/userProfile';
+import { isWorkspacePaid } from '../billing/featureGate';
 
 const log = createLogger('Orchestrator');
 
@@ -104,6 +105,38 @@ async function executeOneCall(
       if (latest?.data?.taskId) {
         parsedArgs.taskId = latest.data.taskId;
       }
+    }
+  }
+
+  // Billing gate — block WRITE tools when the workspace isn't paid. Read tools
+  // (ListTasks, FindTask, AskClarification) still work so the owner can review
+  // their data and the bot can still answer "how's X going". The sentinel
+  // returned here gets phrased by the AI; the orchestrator surface layer must
+  // ensure billing CTA only renders to the OWNER (never to channels with
+  // employees present) — see handleConversationTurn.
+  const writeTools = new Set([
+    'CreateTask',
+    'UpdateTaskDetails',
+    'UpdateTaskStatus',
+    'DeleteTask',
+    'DeleteTasks',
+    'RecordProgress',
+    'NudgeProgress',
+    'ConfirmAlias',
+  ]);
+  if (writeTools.has(fn.name)) {
+    const gate = await isWorkspacePaid({
+      teamId: context.slack.teamId ?? null,
+      enterpriseId: context.slack.enterpriseId ?? null,
+    });
+    if (!gate.paid) {
+      log.info(`Billing-gated write tool ${fn.name} blocked`, { reason: gate.reason });
+      return {
+        name: fn.name,
+        status: 'error',
+        message: 'BILLING_GATED: workspace subscription is required to make changes. Tell the owner (only) to upgrade — do not mention this to anyone else.',
+        data: { billingGated: true, reason: gate.reason },
+      };
     }
   }
 

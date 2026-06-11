@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { anthropic, extractText, JUDGE_MODEL } from '../ai/anthropic';
 import { createLogger } from '../lib/logger';
+import { isWorkspaceGated } from '../billing/featureGate';
 
 const AMBIENT_GATE_MODEL = process.env.AMBIENT_GATE_MODEL || JUDGE_MODEL;
 
@@ -95,6 +96,16 @@ export async function shouldEngageAmbient(input: AmbientGateInput): Promise<Ambi
 
   const trimmed = (input.text ?? '').trim();
   if (!trimmed) return { engage: false, why: 'empty' };
+
+  // Billing gate — if the workspace is expired/suspended, the bot stays SILENT
+  // in channels. Employees never see "ask your boss to pay" messages; that
+  // would leak the commercial relationship and embarrass the owner. The owner
+  // gets billing prompts only via DM + Home tab.
+  const gated = await isWorkspaceGated({
+    teamId: input.teamId,
+    enterpriseId: input.enterpriseId,
+  });
+  if (gated) return { engage: false, why: 'billing_gated_silent' };
 
   // If the message @-mentions the bot, the `app_mention` event handler is
   // the right entry point — not this one. Slack delivers BOTH events for a

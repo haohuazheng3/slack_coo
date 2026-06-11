@@ -2,6 +2,8 @@ import { PrismaClient, Task } from '@prisma/client';
 import { buildTaskCardBlocks, RenderableTask } from '../ui/taskCard';
 import { detectLanguageFromTexts, getTranslator, Translator } from '../lib/i18n';
 import { signDashboardToken } from '../dashboard/auth';
+import { isWorkspacePaid, GateResult } from '../billing/featureGate';
+import { signBillingToken } from '../billing/auth';
 
 type HomeViewBlock = {
   type: string;
@@ -87,6 +89,25 @@ export async function buildHomeView(
     header(translator.t('home.title')),
     context(translator.t('home.hint')),
   ];
+
+  // Billing banner — render at the top of the Home tab if there's anything to
+  // say. Founding workspaces get a quiet badge; trialing gets a thin context
+  // line; expiring soon turns amber; expired/suspended turns red with the
+  // Upgrade button as the primary action. Only the owner ever sees their own
+  // Home tab, so this is owner-visible by Slack's own design.
+  const lang = (translator as any).language === 'zh' || /[一-鿿]/.test(translator.t('home.title'))
+    ? 'zh'
+    : 'en';
+  const billingBanner = await buildBillingBanner({
+    ownerId,
+    teamId,
+    enterpriseId,
+    lang,
+  });
+  if (billingBanner.length > 0) {
+    blocks.push(...billingBanner);
+    blocks.push(divider());
+  }
 
   // "Open in browser" — only render when we can actually produce a working URL.
   // Needs both BASE_URL (so the link resolves) and teamId (so the token has
@@ -187,6 +208,204 @@ function buildOnboardingCard(translator: Translator): HomeViewBlock {
         `_${translator.t('onboarding.footer')}_`,
       ].join('\n'),
     },
+  };
+}
+
+/**
+ * Build the billing banner blocks at the top of the Home tab.
+ *
+ * Maps gate state → banner:
+ *   - founding   → small "Founding workspace — free forever" context line
+ *   - active     → thin "Pro · renews [date]" context with Manage button
+ *   - trialing >3d left → thin "Trial — N days left" context
+ *   - trialing ≤3d left → amber section + Upgrade button (primary)
+ *   - trialing ≤1d left → red section + Upgrade button
+ *   - grace      → amber "Payment failed — update card" + Manage
+ *   - cancelled_active → gray "Cancelled — access until [date]"
+ *   - expired / suspended → red "Subscription needed" + Upgrade
+ *   - no_billing_row / billing_disabled → no banner (clean slate)
+ *
+ * Only one of the buttons (Upgrade or Manage) appears, never both — billing
+ * actions are mutually exclusive in any given state.
+ */
+async function buildBillingBanner(args: {
+  ownerId: string;
+  teamId: string | null;
+  enterpriseId: string | null;
+  lang: 'en' | 'zh';
+}): Promise<HomeViewBlock[]> {
+  const gate = await isWorkspacePaid({ teamId: args.teamId, enterpriseId: args.enterpriseId });
+  const zh = args.lang === 'zh';
+
+  if (gate.isGrandfathered) {
+    return [
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: zh
+              ? '🌟 *创始工作区* — 终身免费,感谢内测期支持'
+              : '🌟 *Founding workspace* — free forever, thanks for being in beta',
+          },
+        ],
+      },
+    ];
+  }
+
+  if (gate.reason === 'no_billing_row' || gate.reason === 'billing_disabled') {
+    return [];
+  }
+
+  if (gate.reason === 'active') {
+    const dateStr = gate.expiresAt
+      ? gate.expiresAt.toLocaleDateString(zh ? 'zh-CN' : 'en-US')
+      : '';
+    const text = zh ? `Pro · 下次续费 ${dateStr}` : `Pro · renews ${dateStr}`;
+    return [
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text }],
+      },
+      buildBillingActionsBlock(args, 'manage'),
+    ];
+  }
+
+  if (gate.reason === 'cancelled_active') {
+    const dateStr = gate.expiresAt
+      ? gate.expiresAt.toLocaleDateString(zh ? 'zh-CN' : 'en-US')
+      : '';
+    return [
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: zh ? `_已取消 · 访问到 ${dateStr}_` : `_Cancelled · access until ${dateStr}_`,
+          },
+        ],
+      },
+      buildBillingActionsBlock(args, 'manage'),
+    ];
+  }
+
+  if (gate.reason === 'trialing') {
+    const days = gate.expiresAt
+      ? Math.max(0, Math.ceil((gate.expiresAt.getTime() - Date.now()) / 86400000))
+      : 14;
+    if (days > 3) {
+      return [
+        {
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: zh ? `_试用 — 还剩 ${days} 天_` : `_Trial — ${days} days left_`,
+            },
+          ],
+        },
+      ];
+    }
+    if (days > 1) {
+      return [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: zh
+              ? `*试用还剩 ${days} 天* — 想继续追踪手头的任务和员工进度,升级一下:`
+              : `*${days} days left in trial* — keep tracking tasks and employee progress:`,
+          },
+        },
+        buildBillingActionsBlock(args, 'upgrade'),
+      ];
+    }
+    // Final day
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: zh
+            ? '🔴 *试用最后一天* — 明天会暂停新任务和员工对话,直到升级。'
+            : "🔴 *Last day of trial* — tomorrow I pause new tasks and employee check-ins until you upgrade.",
+        },
+      },
+      buildBillingActionsBlock(args, 'upgrade'),
+    ];
+  }
+
+  if (gate.reason === 'grace') {
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: zh
+            ? '🟡 *续费失败 — 宽限期内* — 现在更新卡片就行。'
+            : '🟡 *Payment failed — within grace period.* Update your card to keep things running.',
+        },
+      },
+      buildBillingActionsBlock(args, 'manage'),
+    ];
+  }
+
+  if (gate.reason === 'expired' || gate.reason === 'suspended') {
+    return [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: zh
+            ? '🔴 *已暂停* — 新任务和员工对话已停止。看板和现有任务都保留着,升级后立刻恢复。'
+            : "🔴 *Paused* — new tasks and employee check-ins stopped. Dashboard and existing tasks preserved; upgrade to resume.",
+        },
+      },
+      buildBillingActionsBlock(args, 'upgrade'),
+    ];
+  }
+
+  return [];
+}
+
+function buildBillingActionsBlock(
+  args: { ownerId: string; teamId: string | null; enterpriseId: string | null; lang: 'en' | 'zh' },
+  kind: 'upgrade' | 'manage'
+): HomeViewBlock {
+  const tokenArgs = {
+    userId: args.ownerId,
+    teamId: args.teamId,
+    enterpriseId: args.enterpriseId,
+    intent: kind === 'upgrade' ? ('upgrade' as const) : ('portal' as const),
+  };
+  const token = signBillingToken(tokenArgs);
+  const zh = args.lang === 'zh';
+  const price = Number(process.env.BILLING_PRICE_USD_MONTHLY ?? '99');
+
+  if (kind === 'upgrade') {
+    return {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          style: 'primary',
+          text: { type: 'plain_text', text: zh ? `升级 — $${price}/月` : `Upgrade — $${price}/mo` },
+          action_id: 'billing_upgrade',
+          value: token,
+        },
+      ],
+    };
+  }
+  return {
+    type: 'actions',
+    elements: [
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: zh ? '管理订阅' : 'Manage billing' },
+        action_id: 'billing_manage',
+        value: token,
+      },
+    ],
   };
 }
 

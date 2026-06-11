@@ -251,7 +251,120 @@ model SlackInstallation {
   installedAt     DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  /// Founding workspace flag — backfilled to TRUE at monetization launch for
+  /// every install whose installedAt < MONETIZATION_LAUNCH_CUTOFF. Stored as
+  /// a boolean (not recomputed from createdAt) so the cohort is immutable even
+  /// if env vars change later. featureGate short-circuits to paid=true when this
+  /// is set: no trial timer, no paywall, no scheduler filter — ever.
+  isGrandfathered Boolean  @default(false)
+
+  /// Backref to the billing row (lazy-created on first Upgrade click).
+  billing         WorkspaceBilling?
+
   @@unique([teamId, enterpriseId])
   @@index([teamId])
   @@index([enterpriseId])
+  @@index([isGrandfathered])
+}
+
+/// Mirrors Stripe Subscription statuses verbatim so debugging never requires a
+/// translation table. NONE = no Stripe relationship has ever existed for this
+/// workspace (default for new installs before they click Upgrade).
+enum BillingStatus {
+  NONE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  PAUSED
+}
+
+/// One row per workspace that has ever interacted with billing. Created LAZILY:
+/// on the OAuth callback we mark trial; on the first Upgrade click we mint a
+/// Stripe Customer. Workspaces that never click anything stay in NONE forever
+/// — we don't pollute Stripe with empty Customer objects.
+///
+/// Stripe is the SOURCE OF TRUTH for paid statuses (ACTIVE/PAST_DUE/CANCELED
+/// flow in via webhooks). Cron is the source of truth for trial/grace expiry
+/// (purely date-based, no external event).
+model WorkspaceBilling {
+  id                     String   @id @default(cuid())
+
+  /// 1:1 with SlackInstallation. onDelete: SetNull so uninstall doesn't nuke
+  /// billing history — if they reinstall within an active subscription period
+  /// we re-link via metadata.installationId.
+  installationId         String   @unique
+  installation           SlackInstallation @relation(fields: [installationId], references: [id], onDelete: SetNull)
+
+  /// Denormalized for fast webhook lookup without an installation JOIN.
+  teamId                 String?
+  enterpriseId           String?
+
+  /// "cus_..." — written once on first Upgrade click. Unique because Stripe
+  /// Customer <-> Slack workspace is strictly 1:1.
+  stripeCustomerId       String?  @unique
+
+  /// "sub_..." — current active subscription. Nullable until first paid checkout.
+  stripeSubscriptionId   String?  @unique
+
+  /// "price_..." — the price the workspace is currently on. Lets us render
+  /// plan name without round-tripping to Stripe.
+  stripePriceId          String?
+
+  /// Source of truth: Stripe. This column is a read-through cache for fast
+  /// feature gating.
+  status                 BillingStatus @default(NONE)
+
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean  @default(false)
+  /// When access ends if the user cancelled. For CANCELED + cancelAtPeriodEnd
+  /// rows, this equals currentPeriodEnd.
+  accessUntil            DateTime?
+
+  trialEndsAt            DateTime?
+  /// Grace window after invoice.payment_failed before we flip to UNPAID.
+  graceEndsAt            DateTime?
+
+  /// Reminder bookkeeping — null | "EXPIRING_SOON" | "FINAL_DAY" | "EXPIRED".
+  /// Guards against re-sending the same trial DM on every cron tick.
+  lastTrialReminderStage String?
+
+  /// null | "D1" | "D4" | "D7" — same idea for the dunning sequence during grace.
+  lastGraceReminderStage String?
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  events                 StripeWebhookEvent[]
+
+  @@index([teamId, enterpriseId])
+  @@index([status])
+}
+
+/// Idempotency log + audit trail for every Stripe webhook delivery.
+/// Inserting (stripeEventId UNIQUE) inside the handler tx guarantees a retried
+/// delivery from Stripe collapses to a no-op even if the original processing
+/// crashed mid-flight.
+model StripeWebhookEvent {
+  id                 String   @id @default(cuid())
+
+  stripeEventId      String   @unique
+  type               String
+
+  workspaceBillingId String?
+  workspaceBilling   WorkspaceBilling? @relation(fields: [workspaceBillingId], references: [id], onDelete: SetNull)
+
+  payload            Json
+
+  receivedAt         DateTime @default(now())
+  processedAt        DateTime?
+  /// Last error message if processing failed. Null on success. Lets us
+  /// re-process from the stored payload after fixing a handler bug.
+  error              String?
+
+  @@index([type, receivedAt])
+  @@index([workspaceBillingId])
 }

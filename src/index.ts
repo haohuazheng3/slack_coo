@@ -38,6 +38,18 @@ import { renderDashboard, renderExpiredOrInvalid, LANG_SWITCH_PLACEHOLDER } from
 import { registerFeedbackHandlers } from './feedback/handlers';
 import { renderFeedbackAdmin, renderFeedbackEmpty } from './feedback/pages';
 
+import { buildWebhookRouter } from './billing/webhookRouter';
+import { registerBillingActions } from './slack/billingActions';
+import { startBillingScheduler } from './billing/scheduler';
+import { isBillingConfigured } from './billing/stripeClient';
+import { verifyBillingToken } from './billing/auth';
+import { renderBillingPageHtml } from './billing/page';
+import { renderReturnSuccessHtml, renderReturnCancelHtml } from './billing/returnPage';
+import { createCheckoutSession } from './billing/checkout';
+import { createPortalSession } from './billing/portal';
+import { startTrial } from './billing/customer';
+import { sendBillingDM } from './billing/notifier';
+
 dotenv.config();
 
 const log = createLogger('App');
@@ -93,10 +105,45 @@ const receiver = new ExpressReceiver({
     redirectUriPath: '/slack/oauth_redirect',
     installPath: '/slack/install',
     callbackOptions: {
-      success: (_installation, _options, req, res) => {
+      success: async (installation, _options, req, res) => {
         // Slack's OAuth redirect doesn't preserve our `?lang=` choice, so the
         // success page defaults to English with the in-nav switcher available.
         const lang = req ? readLangFromRequest(req as any) : 'en';
+
+        // Fire-and-forget trial start. Don't await — if it errors we still want
+        // the user to see the success page, and the row will be lazy-created
+        // on the first Upgrade click anyway. Only runs when billing is
+        // configured; pre-launch installs are caught by the grandfather flag.
+        if (isBillingConfigured()) {
+          // The Slack OAuth install row was just persisted by prismaInstallationStore.
+          // Find it back so we have the canonical installationId.
+          const teamId = installation.team?.id ?? null;
+          const enterpriseId = installation.enterprise?.id ?? null;
+          const installerUserId = installation.user?.id ?? null;
+          prisma.slackInstallation
+            .findFirst({ where: { teamId, enterpriseId } })
+            .then(async (row) => {
+              if (!row || row.isGrandfathered) return;
+              // Referral courtesy: if the installer themselves is a
+              // grandfathered user (installed during beta), give the new
+              // workspace a 90-day extended trial instead of 14.
+              const referral = installerUserId
+                ? await prisma.slackInstallation.findFirst({
+                    where: { installerUserId, isGrandfathered: true },
+                  })
+                : null;
+              const trialDays = referral ? 90 : 14;
+              await startTrial({ installationId: row.id, trialDays });
+              // Best-effort welcome DM. Use app.client because the bot
+              // token is attached to the install we just stored.
+              sendBillingDM(app.client, {
+                installationId: row.id,
+                kind: 'trial_started',
+              }).catch(() => undefined);
+            })
+            .catch((err) => log.warn('Trial start failed', { error: String(err) }));
+        }
+
         sendHtml(res as any, successHtml(lang));
       },
       failure: (error, _options, req, res) => {
@@ -113,11 +160,27 @@ const receiver = new ExpressReceiver({
 
 const app = new App({ receiver });
 
+// CRITICAL: mount the Stripe webhook router BEFORE any json-body middleware.
+// Bolt's ExpressReceiver doesn't install a global json parser by default — it
+// uses per-handler parsing — so as long as we mount this on receiver.app
+// before any other route uses raw body, the signature verification works.
+// Use express.raw inside the router (route-local middleware) so the rest of
+// the app is unaffected. Without this ordering, stripe.webhooks.constructEvent
+// would silently fail signature checks and no workspace would ever flip to
+// ACTIVE after a successful payment.
+if (isBillingConfigured()) {
+  receiver.app.use('/webhooks/stripe', buildWebhookRouter());
+  log.info('Stripe webhook router mounted at /webhooks/stripe');
+} else {
+  log.warn('Billing not configured — Stripe webhook route NOT mounted');
+}
+
 const functionRegistry = new FunctionRegistry();
 registerCoreFunctions(functionRegistry);
 
 registerActions(app, functionRegistry);
 registerFeedbackHandlers(app);
+registerBillingActions(app);
 
 receiver.router.get('/healthz', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
@@ -224,6 +287,134 @@ receiver.router.get('/feedback', async (req, res) => {
     log.error('Feedback page render failed', { error: String(err) });
     sendHtml(res, renderFeedbackEmpty('Something broke while loading reports.'), 500);
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Billing routes (all token-gated; webhook is mounted separately above with
+// raw body parser — these are normal GET routes).
+// ─────────────────────────────────────────────────────────────────────────────
+
+receiver.router.get('/billing', async (req, res) => {
+  if (!isBillingConfigured()) {
+    res.status(503).type('text/plain').send('Billing not configured.');
+    return;
+  }
+  const token = (req.query?.token ?? '').toString();
+  const verified = verifyBillingToken(token);
+  if (!verified.ok) {
+    res.status(401).type('text/plain').send('Link expired or invalid. Open from the Slack Home tab.');
+    return;
+  }
+  const { uid, tid, eid } = verified.payload;
+  const lang = readLangFromRequest(req) === 'zh' ? 'zh' : 'en';
+  try {
+    const html = await renderBillingPageHtml({
+      userId: uid,
+      teamId: tid,
+      enterpriseId: eid,
+      token,
+      lang,
+    });
+    sendHtml(res, html);
+  } catch (err) {
+    log.error('Billing page render failed', { error: String(err) });
+    res.status(500).type('text/plain').send('Something broke loading billing.');
+  }
+});
+
+// Click-through redirects — these mint Stripe sessions server-side and 302 to
+// Stripe-hosted URLs. We expose them as GET so the /billing page's anchor
+// buttons can link straight here (single-click upgrade flow).
+receiver.router.get('/billing/upgrade', async (req, res) => {
+  if (!isBillingConfigured()) {
+    res.status(503).type('text/plain').send('Billing not configured.');
+    return;
+  }
+  const verified = verifyBillingToken((req.query?.token ?? '').toString());
+  if (!verified.ok) {
+    res.status(401).type('text/plain').send('Link expired or invalid.');
+    return;
+  }
+  const { uid, tid, eid } = verified.payload;
+  const install = await prisma.slackInstallation.findFirst({
+    where: { teamId: tid, enterpriseId: eid },
+  });
+  if (!install) {
+    res.status(404).type('text/plain').send('Workspace not found.');
+    return;
+  }
+  if (install.installerUserId && install.installerUserId !== uid) {
+    res.status(403).type('text/plain').send('Only the workspace owner can manage billing.');
+    return;
+  }
+  try {
+    const session = await createCheckoutSession({
+      installationId: install.id,
+      userId: uid,
+      teamId: tid,
+      enterpriseId: eid,
+    });
+    res.redirect(303, session.url);
+  } catch (err) {
+    log.error('Checkout session creation failed', { error: String(err) });
+    res.status(500).type('text/plain').send('Could not open checkout.');
+  }
+});
+
+receiver.router.get('/billing/manage', async (req, res) => {
+  if (!isBillingConfigured()) {
+    res.status(503).type('text/plain').send('Billing not configured.');
+    return;
+  }
+  const verified = verifyBillingToken((req.query?.token ?? '').toString());
+  if (!verified.ok) {
+    res.status(401).type('text/plain').send('Link expired or invalid.');
+    return;
+  }
+  const { uid, tid, eid } = verified.payload;
+  const install = await prisma.slackInstallation.findFirst({
+    where: { teamId: tid, enterpriseId: eid },
+  });
+  if (!install) {
+    res.status(404).type('text/plain').send('Workspace not found.');
+    return;
+  }
+  if (install.installerUserId && install.installerUserId !== uid) {
+    res.status(403).type('text/plain').send('Only the workspace owner can manage billing.');
+    return;
+  }
+  try {
+    const session = await createPortalSession({
+      installationId: install.id,
+      userId: uid,
+      teamId: tid,
+      enterpriseId: eid,
+    });
+    res.redirect(303, session.url);
+  } catch (err) {
+    log.error('Portal session creation failed', { error: String(err) });
+    res.status(500).type('text/plain').send('Could not open billing portal.');
+  }
+});
+
+receiver.router.get('/billing/return', async (req, res) => {
+  const verified = verifyBillingToken((req.query?.token ?? '').toString());
+  if (!verified.ok) {
+    res.status(401).type('text/plain').send('Link expired or invalid.');
+    return;
+  }
+  const lang = readLangFromRequest(req) === 'zh' ? 'zh' : 'en';
+  sendHtml(res, renderReturnSuccessHtml({ lang, teamId: verified.payload.tid }));
+});
+
+receiver.router.get('/billing/cancel', async (req, res) => {
+  const verified = verifyBillingToken((req.query?.token ?? '').toString());
+  if (!verified.ok) {
+    res.status(401).type('text/plain').send('Link expired or invalid.');
+    return;
+  }
+  const lang = readLangFromRequest(req) === 'zh' ? 'zh' : 'en';
+  sendHtml(res, renderReturnCancelHtml({ lang, teamId: verified.payload.tid }));
 });
 
 app.event('app_mention', async ({ event, client, context }) => {
@@ -480,6 +671,16 @@ app.event('app_uninstalled', async ({ context }) => {
   });
 
   startProgressCheckScheduler(functionRegistry);
+
+  // Billing scheduler — hourly tick that advances trial reminders + grace
+  // dunning + state expirations. Only started if billing is actually
+  // configured; otherwise it would be making decisions about workspaces with
+  // no real billing rows.
+  if (isBillingConfigured()) {
+    startBillingScheduler(app.client);
+  } else {
+    log.info('Billing not configured — billing scheduler NOT started');
+  }
 })();
 
 const shutdown = async (signal: string) => {

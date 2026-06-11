@@ -8,6 +8,7 @@ import { judgeTasks, OpsDecision } from '../orchestrator/opsJudge';
 import { refreshOwnerHome } from '../slack/taskCardUpdater';
 import { conversationStore } from '../orchestrator/conversationStore';
 import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
+import { isWorkspaceGated } from '../billing/featureGate';
 
 const log = createLogger('ProgressCheck');
 
@@ -72,6 +73,22 @@ async function runOnce() {
 
   for (const [, group] of byWorkspace) {
     const sample = group[0];
+
+    // Billing gate — skip workspaces that are EXPIRED/SUSPENDED. The scheduler
+    // does not "catch up" on missed pings when the workspace later reactivates;
+    // we resume forward, never spam old check-ins to employees.
+    const gated = await isWorkspaceGated({
+      teamId: sample.teamId,
+      enterpriseId: sample.enterpriseId,
+    });
+    if (gated) {
+      log.info('Workspace billing-gated, skipping ops batch', {
+        teamId: sample.teamId,
+        enterpriseId: sample.enterpriseId,
+      });
+      continue;
+    }
+
     const slackClient = await getClientForTeam(sample.teamId, sample.enterpriseId);
     if (!slackClient) {
       log.warn('No Slack client for workspace, skipping batch', {
