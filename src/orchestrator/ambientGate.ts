@@ -1,6 +1,8 @@
 import { PrismaClient } from '@prisma/client';
-import { anthropic, extractText, PRIMARY_MODEL } from '../ai/anthropic';
+import { anthropic, extractText, JUDGE_MODEL } from '../ai/anthropic';
 import { createLogger } from '../lib/logger';
+
+const AMBIENT_GATE_MODEL = process.env.AMBIENT_GATE_MODEL || JUDGE_MODEL;
 
 const log = createLogger('AmbientGate');
 
@@ -58,6 +60,36 @@ const GATE_SCHEMA = {
  * colleague who's working in the corner; speaking up uninvited is far worse than
  * missing a borderline cue.
  */
+// Aggressive pre-filter: messages where the answer is obviously "stay silent"
+// shouldn't burn an LLM call. Every entry here is a pattern an LLM would
+// reliably say "no" on anyway — we just short-circuit before paying for it.
+const NOISE_PATTERNS: RegExp[] = [
+  // Pure acks and reactions (no work content).
+  /^(ok|okay|k|kk|sure|yes|yep|yeah|nope|no|maybe|thanks|thx|ty|got it|nice|cool|lol|lmao|haha|haha+|hahaha+|np|gotcha|alright|right|true|wow|nice one)[!.?]*$/i,
+  /^(好|好的|收到|行|嗯|嗯嗯|嗯哼|哦|噢|哈|哈哈|哈哈+|是|对|可以|没事|不错|不行|不|啊|呃|嗨|嘿|哇)[!?。.?！。]*$/,
+  // Pure single-word fillers used between thoughts.
+  /^(um|uh|hmm|hm|so|well|like|anyway|btw)[.,]?$/i,
+];
+
+const WORK_KEYWORDS_EN = [
+  'task', 'tasks', 'deadline', 'due', 'finish', 'finished', 'done', 'shipped', 'ship', 'launch',
+  'review', 'blocked', 'block', 'progress', 'eod', 'tomorrow', 'today', 'tonight', 'this week',
+  'next week', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'assign', 'remind', 'follow up', 'follow-up',
+];
+const WORK_KEYWORDS_ZH = [
+  '任务', '截止', '完成', '做完', '搞定', '交付', '上线', '发布', '复盘', '卡住', '阻塞',
+  '进度', '今晚', '今天', '明天', '后天', '本周', '下周', '周一', '周二', '周三', '周四', '周五',
+  '周六', '周日', '负责人', '安排', '让', '帮我', '提醒', '麻烦', '记得',
+];
+
+function hasWorkKeyword(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (WORK_KEYWORDS_EN.some((kw) => lower.includes(kw))) return true;
+  if (WORK_KEYWORDS_ZH.some((kw) => text.includes(kw))) return true;
+  return false;
+}
+
 export async function shouldEngageAmbient(input: AmbientGateInput): Promise<AmbientGateResult> {
   if (input.isSelf) return { engage: false, why: 'self' };
 
@@ -70,6 +102,25 @@ export async function shouldEngageAmbient(input: AmbientGateInput): Promise<Ambi
   // twice on the same message. Hand it off cleanly.
   if (input.botUserId && trimmed.includes(`<@${input.botUserId}>`)) {
     return { engage: false, why: 'app_mention_handles_this' };
+  }
+
+  // Cheap pre-filter — drop obvious noise BEFORE paying for an LLM call.
+  // This is the highest-volume cost saver: in active channels, the majority
+  // of messages are short acks, social chatter, single-word reactions. None
+  // of those need a Haiku decision; the LLM would reliably say "stay silent"
+  // on every one.
+  if (trimmed.length <= 4) {
+    return { engage: false, why: 'too_short_no_llm' };
+  }
+  for (const pat of NOISE_PATTERNS) {
+    if (pat.test(trimmed)) return { engage: false, why: 'noise_pattern_no_llm' };
+  }
+
+  // Slightly longer messages with NO work-keyword AND speaker has no open
+  // tasks → almost certainly off-topic chatter, skip the LLM.
+  if (trimmed.length <= 30 && !hasWorkKeyword(trimmed)) {
+    // We still need to check task context before declaring noise.
+    // The query below runs anyway, so this is cheap.
   }
 
   const [openTasksInChannel, openTasksWithSpeaker] = await Promise.all([
@@ -100,6 +151,19 @@ export async function shouldEngageAmbient(input: AmbientGateInput): Promise<Ambi
       take: 8,
     }),
   ]);
+
+  // Second-stage pre-filter (post-DB-lookup, still pre-LLM): if the channel has
+  // NO open tasks AND the speaker has NO open tasks AND the message is short
+  // with no work keyword — almost certainly off-topic. Skip the LLM. This is
+  // the single biggest cost saver for busy channels where the bot is in
+  // #general but only really tracks work happening elsewhere.
+  if (
+    openTasksInChannel.length === 0 &&
+    openTasksWithSpeaker.length === 0 &&
+    !hasWorkKeyword(trimmed)
+  ) {
+    return { engage: false, why: 'no_task_context_no_llm' };
+  }
 
   const knownAlias = await input.prisma.personAlias.findFirst({
     where: {
@@ -144,7 +208,7 @@ export async function shouldEngageAmbient(input: AmbientGateInput): Promise<Ambi
   let parsed: { engage?: boolean; why?: string };
   try {
     const response = await anthropic.messages.create({
-      model: PRIMARY_MODEL,
+      model: AMBIENT_GATE_MODEL,
       max_tokens: 200,
       system: [
         {

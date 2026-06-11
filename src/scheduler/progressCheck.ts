@@ -12,7 +12,9 @@ import { openDm, postMessageWithFeedback } from '../lib/sendHelpers';
 const log = createLogger('ProgressCheck');
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
-const OPS_CRON = process.env.OPS_JUDGE_CRON || '*/15 * * * *';
+// 20-minute cadence (was 15). 75% of the responsiveness, ~75% of the cost.
+// Override with OPS_JUDGE_CRON env var if a workspace needs tighter loops.
+const OPS_CRON = process.env.OPS_JUDGE_CRON || '*/20 * * * *';
 const CONVERSATION_TTL_CRON = '0 3 * * *';
 const CONVERSATION_TTL_MS = 7 * 24 * ONE_HOUR_MS;
 

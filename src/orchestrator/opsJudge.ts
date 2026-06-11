@@ -1,6 +1,10 @@
 import { Task, TaskPriority, TaskStatus, PrismaClient } from '@prisma/client';
-import { anthropic, extractText, PRIMARY_MODEL } from '../ai/anthropic';
+import { anthropic, extractText, JUDGE_MODEL } from '../ai/anthropic';
 import { createLogger } from '../lib/logger';
+
+// Per-judge model override env var, falls back to JUDGE_MODEL (Haiku 4.5).
+// Bump this to claude-sonnet-4-6 if Haiku starts misfiring on edge cases.
+const OPS_JUDGE_MODEL = process.env.OPS_JUDGE_MODEL || JUDGE_MODEL;
 
 const log = createLogger('OpsJudge');
 
@@ -248,8 +252,11 @@ export async function judgeTasks(
   let parsed: { decisions?: any[] };
   try {
     const response = await anthropic.messages.create({
-      model: PRIMARY_MODEL,
+      model: OPS_JUDGE_MODEL,
       max_tokens: 8000,
+      // No `thinking` param — Haiku 4.5 doesn't support adaptive thinking, and
+      // the judge decision is simple enough not to need it. If we ever upgrade
+      // this path back to Opus, add `thinking: { type: 'adaptive' }`.
       system: [
         {
           type: 'text',

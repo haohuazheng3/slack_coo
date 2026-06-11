@@ -193,6 +193,21 @@ export async function runAiOrchestrator(
     };
   }
 
+  // Cache instrumentation — surfaces whether the frozen system-prompt block
+  // is actually getting the 90% cache discount per request. After a deploy,
+  // grep Render logs for "cache_read_input_tokens" and watch the second
+  // request within ~5 min in a conversation: that's where the cache should
+  // hit. If cache_read stays 0 across consecutive requests, the prompt's
+  // frozen prefix is below Opus 4.7's 4096-token cacheable minimum (silent
+  // failure) — see shared/prompt-caching.md.
+  const usage: any = response.usage ?? {};
+  log.info('Anthropic usage', {
+    input_tokens: usage.input_tokens ?? 0,
+    output_tokens: usage.output_tokens ?? 0,
+    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+  });
+
   const rawText = extractText(response);
   const { cleanedText, calls } = extractFunctionCalls(rawText);
 

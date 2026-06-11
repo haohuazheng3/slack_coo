@@ -1,6 +1,8 @@
 import { TaskStatus } from '@prisma/client';
-import { anthropic, extractText, PRIMARY_MODEL } from '../ai/anthropic';
+import { anthropic, extractText, JUDGE_MODEL } from '../ai/anthropic';
 import { createLogger } from '../lib/logger';
+
+const SUMMARIZER_MODEL = process.env.SUMMARIZER_MODEL || JUDGE_MODEL;
 
 const log = createLogger('AiSummarizer');
 
@@ -99,7 +101,7 @@ export async function interpretEmployeeProgress(args: {
 
   try {
     const response = await anthropic.messages.create({
-      model: PRIMARY_MODEL,
+      model: SUMMARIZER_MODEL,
       max_tokens: 1000,
       system: [
         {
